@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 import { prepareCached } from './statementCache'
 import { bumpSessionDeletionEpoch } from './sessionInvalidation'
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 
 import type { StoredSession, VersionedUpdateResult } from './types'
 import { safeJsonParse } from './json'
@@ -413,7 +414,7 @@ export function updateSessionMetadata(
     metadata: unknown,
     expectedVersion: number,
     namespace: string,
-    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean }
+    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; skipUnchanged?: boolean }
 ): VersionedUpdateResult<unknown | null> {
     const now = Date.now()
     const touchUpdatedAt = options?.touchUpdatedAt !== false
@@ -421,9 +422,27 @@ export function updateSessionMetadata(
 
     try {
         return db.transaction((): VersionedUpdateResult<unknown | null> => {
-            const existing = getSessionByNamespace(db, id, namespace)
-            if (!existing) {
+            const row = prepareCached(db,
+                'SELECT id, tag, metadata, metadata_version FROM sessions WHERE id = ? AND namespace = ?'
+            ).get(id, namespace) as Pick<DbSessionRow, 'id' | 'tag' | 'metadata' | 'metadata_version'> | undefined
+            if (!row) {
                 return { result: 'error' }
+            }
+            if (row.metadata_version !== expectedVersion) {
+                return { result: 'version-mismatch', version: row.metadata_version, value: safeJsonParse(row.metadata) }
+            }
+            if (
+                options?.skipUnchanged
+                && !isMachineSpawnPreallocatedStub(row)
+                && row.metadata === JSON.stringify(metadata)
+            ) {
+                return { result: 'success', version: row.metadata_version, value: metadata }
+            }
+            const existing = {
+                id: row.id,
+                tag: row.tag,
+                metadata: safeJsonParse(row.metadata),
+                metadataVersion: row.metadata_version
             }
 
             const prior = existing.metadata
@@ -441,6 +460,14 @@ export function updateSessionMetadata(
                 && !allowUnarchive
             ) {
                 merged = preserveHubArchiveOnMerged(prior, merged)
+            }
+
+            if (
+                options?.skipUnchanged
+                && !isMachineSpawnPreallocatedStub(existing)
+                && (row.metadata === JSON.stringify(merged) || isDeepStrictEqual(prior, merged))
+            ) {
+                return { result: 'success', version: existing.metadataVersion, value: prior }
             }
 
             const result = updateVersionedField({
@@ -508,7 +535,8 @@ export function updateSessionAgentState(
     id: string,
     agentState: unknown,
     expectedVersion: number,
-    namespace: string
+    namespace: string,
+    options?: { skipUnchanged?: boolean }
 ): VersionedUpdateResult<unknown | null> {
     const now = Date.now()
     const normalized = agentState ?? null
@@ -522,6 +550,7 @@ export function updateSessionAgentState(
         versionField: 'agent_state_version',
         expectedVersion,
         value: normalized,
+        skipUnchanged: options?.skipUnchanged,
         encode: (value) => (value === null ? null : JSON.stringify(value)),
         decode: safeJsonParse,
         setClauses: ['updated_at = @updated_at', 'seq = seq + 1'],
@@ -851,6 +880,13 @@ export function touchSessionUpdatedAt(
 export function getSession(db: Database, id: string): StoredSession | null {
     const row = prepareCached(db, 'SELECT * FROM sessions WHERE id = ?').get(id) as DbSessionRow | undefined
     return row ? toStoredSession(row) : null
+}
+
+export function getSessionActivity(db: Database, id: string): Pick<StoredSession, 'namespace' | 'updatedAt'> | null {
+    const row = prepareCached(db,
+        'SELECT namespace, updated_at FROM sessions WHERE id = ?'
+    ).get(id) as { namespace: string; updated_at: number } | undefined
+    return row ? { namespace: row.namespace, updatedAt: row.updated_at } : null
 }
 
 export function getSessionByNamespace(db: Database, id: string, namespace: string): StoredSession | null {

@@ -285,7 +285,8 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             sid,
             preserveHubOwnedMetadata(metadata, sessionAccess.value.metadata),
             expectedVersion,
-            sessionAccess.value.namespace
+            sessionAccess.value.namespace,
+            { skipUnchanged: true }
         )
         if (result.result === 'success') {
             cb({ result: 'success', version: result.version, metadata: result.value })
@@ -295,8 +296,8 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             cb({ result: 'error' })
         }
 
-        if (result.result === 'success') {
-            const stored = store.sessions.getSession(sid)
+        if (result.result === 'success' && result.version > expectedVersion) {
+            const stored = store.sessions.getSessionActivity(sid)
             const update = {
                 id: randomUUID(),
                 seq: Date.now(),
@@ -351,7 +352,8 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             sid,
             agentState,
             expectedVersion,
-            sessionAccess.value.namespace
+            sessionAccess.value.namespace,
+            { skipUnchanged: true }
         )
         if (result.result === 'success') {
             cb({ result: 'success', version: result.version, agentState: result.value })
@@ -361,8 +363,8 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             cb({ result: 'error' })
         }
 
-        if (result.result === 'success') {
-            const stored = store.sessions.getSession(sid)
+        if (result.result === 'success' && result.version > expectedVersion) {
+            const stored = store.sessions.getSessionActivity(sid)
             const update = {
                 id: randomUUID(),
                 seq: Date.now(),

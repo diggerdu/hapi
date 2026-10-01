@@ -632,6 +632,19 @@ export function getImmediateQueuedLocalMessages(
     return rows.map(toStoredMessage)
 }
 
+export function hasImmediateQueuedLocalMessages(db: Database, sessionId: string): boolean {
+    return Boolean(prepareCached(db, `
+        SELECT 1 FROM messages
+        WHERE session_id = ?
+          AND invoked_at IS NULL
+          AND local_id IS NOT NULL
+          AND scheduled_at IS NULL
+          AND delivery_state = 'queued'
+        ORDER BY seq ASC
+        LIMIT 1
+    `).get(sessionId))
+}
+
 /**
  * Total messages persisted for a session - any role, any state (including
  * future-scheduled and never-invoked queued rows). Used as the

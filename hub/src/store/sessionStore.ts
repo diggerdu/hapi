@@ -6,6 +6,7 @@ import {
     getOrCreateSession,
     adoptPreallocatedSession,
     getSession,
+    getSessionActivity,
     getSessionByNamespace,
     getSessions,
     getSessionsByNamespace,
@@ -65,7 +66,7 @@ export class SessionStore {
         metadata: unknown,
         expectedVersion: number,
         namespace: string,
-        options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean }
+        options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; skipUnchanged?: boolean }
     ): VersionedUpdateResult<unknown | null> {
         return updateSessionMetadata(this.db, id, metadata, expectedVersion, namespace, options)
     }
@@ -74,9 +75,10 @@ export class SessionStore {
         id: string,
         agentState: unknown,
         expectedVersion: number,
-        namespace: string
+        namespace: string,
+        options?: { skipUnchanged?: boolean }
     ): VersionedUpdateResult<unknown | null> {
-        return updateSessionAgentState(this.db, id, agentState, expectedVersion, namespace)
+        return updateSessionAgentState(this.db, id, agentState, expectedVersion, namespace, options)
     }
 
     setSessionTodos(id: string, todos: unknown, todosUpdatedAt: number, namespace: string): boolean {
@@ -134,6 +136,10 @@ export class SessionStore {
 
     getSession(id: string): StoredSession | null {
         return getSession(this.db, id)
+    }
+
+    getSessionActivity(id: string): Pick<StoredSession, 'namespace' | 'updatedAt'> | null {
+        return getSessionActivity(this.db, id)
     }
 
     getSessionByNamespace(id: string, namespace: string): StoredSession | null {

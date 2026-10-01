@@ -53,6 +53,35 @@ function reasoningTextOf(message: { content: unknown }): string {
 }
 
 describe('cli session handlers', () => {
+    it.each(['update-metadata', 'update-state'])('acknowledges unchanged %s without broadcasting', event => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('unchanged', { path: '/tmp', host: 'test' }, null, 'default')
+            const socket = new FakeSocket()
+            const webEvents: SyncEvent[] = []
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store,
+                resolveSessionAccess: () => ({ ok: true, value: store.sessions.getSession(session.id)! }),
+                emitAccessError() {},
+                onWebappEvent: update => webEvents.push(update)
+            })
+            const version = event === 'update-metadata' ? session.metadataVersion : session.agentStateVersion
+            const payload = event === 'update-metadata' ? { metadata: session.metadata } : { agentState: null }
+            let response: unknown
+            socket.trigger(event, { sid: session.id, expectedVersion: version, ...payload }, answer => { response = answer })
+            expect(response).toMatchObject({ result: 'success', version })
+            expect(socket.roomEvents).toHaveLength(0)
+            expect(webEvents).toHaveLength(0)
+            expect(store.sessions.getSession(session.id)).toEqual(session)
+            socket.trigger(event, { sid: session.id, expectedVersion: version + 1, ...payload }, answer => { response = answer })
+            expect(response).toMatchObject({ result: 'version-mismatch', version })
+            expect(socket.roomEvents).toHaveLength(0)
+            expect(webEvents).toHaveLength(0)
+        } finally {
+            store.close()
+        }
+    })
+
     it.each([undefined, 'terminated', 'error'] as const)('preserves shared Codex pending input on execution exit (%s)', reason => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('shared-end', { flavor: 'codex', capabilities: { concurrentClients: true } }, null, 'default')

@@ -419,7 +419,7 @@ export class SessionCache {
         const hubNow = Date.now()
         const preserveQueuedThinking = !requestedThinking && pendingThinkingUntil > hubNow
         const hasUnconsumedPrompt = preserveQueuedThinking
-            && this.store.messages.getImmediateQueuedLocalMessages(session.id).length > 0
+            && this.store.messages.hasImmediateQueuedLocalMessages(session.id)
 
         session.active = true
         session.activeAt = Math.max(session.activeAt, t)
@@ -587,7 +587,7 @@ export class SessionCache {
             return
         }
 
-        const stored = this.store.sessions.getSession(sessionId)
+        const stored = this.store.sessions.getSessionActivity(sessionId)
         if (!stored) {
             return
         }

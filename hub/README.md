@@ -283,6 +283,10 @@ and payloads ≥256 chars are zstd-compressed (TEXT = plaintext JSON, BLOB =
 zstd). User prompts are never truncated — queued rows are delivered to the CLI
 verbatim.
 
+See [long-session performance development](docs/long-session-performance.md)
+for synchronization optimizations, regression coverage, and the synthetic
+benchmark command.
+
 Maintenance scripts (run with the hub stopped before swapping files):
 
 - `scripts/compact-db.ts` — retroactively truncate + compress + VACUUM an
