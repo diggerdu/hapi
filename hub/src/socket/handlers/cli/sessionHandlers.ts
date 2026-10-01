@@ -68,21 +68,6 @@ const updateStateSchema = z.object({
     agentState: z.unknown().nullable()
 })
 
-const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
-
-function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
-    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming
-    const next = { ...(incoming as Record<string, unknown>) }
-    const existing = current && typeof current === 'object' && !Array.isArray(current)
-        ? current as Record<string, unknown>
-        : {}
-    for (const key of HUB_OWNED_METADATA_KEYS) {
-        if (Object.prototype.hasOwnProperty.call(existing, key)) next[key] = existing[key]
-        else delete next[key]
-    }
-    return next
-}
-
 export type SessionHandlersDeps = {
     store: Store
     resolveSessionAccess: ResolveSessionAccess
@@ -271,11 +256,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
 
         const { sid, metadata, expectedVersion } = parsed.data
-        // Fresh resolve: preserveHubOwnedMetadata below merges against
-        // sessionAccess.value.metadata, so the base must be the live row.
-        // A memo-stale base would drop a concurrently-set hub-owned key or
-        // resurrect a concurrently-cleared one in this very write.
-        const sessionAccess = resolveSessionAccess(sid, { fresh: true })
+        const sessionAccess = resolveSessionAccess(sid)
         if (!sessionAccess.ok) {
             cb({ result: 'error', reason: sessionAccess.reason })
             return
@@ -283,10 +264,10 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
 
         const result = store.sessions.updateSessionMetadata(
             sid,
-            preserveHubOwnedMetadata(metadata, sessionAccess.value.metadata),
+            metadata,
             expectedVersion,
             sessionAccess.value.namespace,
-            { skipUnchanged: true }
+            { skipUnchanged: true, preserveHubOwnedFields: true }
         )
         if (result.result === 'success') {
             cb({ result: 'success', version: result.version, metadata: result.value })

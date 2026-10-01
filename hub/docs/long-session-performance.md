@@ -85,13 +85,110 @@ measurements. Metadata comparison still scales with payload size, and a real
 activity update still writes the sessions row. The patch does not establish
 constant-time processing for arbitrarily growing metadata.
 
-## Next verification
+## Socket and SSE load testing
 
-Use an isolated Hub and synthetic CLI traffic to measure event-loop delay and
-authenticated SSE handshake latency while multiple long sessions stream.
-Include unchanged replays, genuine metadata changes, stale-version retries,
-queued input, and concurrent clients. Track per-session event counts and bytes
-without logging message content or tokens.
+The first optimization checkpoint is commit `7c8dfb3f`. Follow-up testing uses
+real Socket.IO CLI clients, authenticated gzip SSE streams, and HTTP message
+pagination against an isolated Hub. No production credentials or databases are
+used. Run the driver with Node 24 (native TypeScript support) and put Bun on PATH:
+
+```sh
+PATH="$HOME/.bun/bin:$PATH" node hub/scripts/stress-long-session.ts \
+    --messages 500000 --sessions 2 --clients 1 --rate 80 \
+    --duration 15 --mode mixed --cpu 0
+bun run --cwd hub typecheck:scripts
+```
+
+`messages` is per session. The Hub worker is pinned to one CPU with `taskset`;
+the driver runs separately. Use a CPU permitted by your host's affinity mask,
+or omit `--cpu`. Fixtures contain invoked historical messages and metadata
+growing with history size. Mixed traffic includes real metadata/state changes,
+agent/user messages and heartbeats. Replay traffic repeats unchanged updates.
+The shared-client scenario deliberately exercises stale-version conflicts;
+these are counted separately from errors.
+
+The generator is open-loop, with a limit of 32 outstanding operations per
+client. Offered, sent, acknowledged and backpressured counts are all reported;
+do not infer successful processing of the full offered rate from latency alone.
+Message/heartbeat operations use a subsequent ping acknowledgement as an
+ordering barrier. Probes open fresh SSE connections and fetch the latest 50
+messages every 250 ms; existing SSE streams remain open and are drained.
+SSE handshake measures the first complete `connection-changed` frame, not just
+HTTP headers. Probe deadlines are five seconds. Worker CPU is process CPU as a
+percentage of one core, and event-loop delay is sampled by a 10 ms timer.
+WebSocket wire bytes exclude HTTP/SSE traffic. RSS is sampled, not a heap-size
+measurement. The harness removes its generated database on exit.
+
+For a diagnostic CPU profile, add `--profile /tmp`. Profiles include startup
+and fixture insertion, so distinguish that work from steady-state traffic.
+The profile of the replay test attributed most steady-state work to WebSocket
+send and Socket.IO JSON parse/stringify, rather than SQL writes. It does not
+prove the precise fraction spent compressing versus socket I/O.
+
+## Follow-Up Optimizations
+
+- CLI metadata updates now preserve Hub-owned fields inside the same store
+  transaction that checks the live version and namespace. This avoids a second
+  full-session read, while retaining protection against forged or stale Hub
+  fields. Internal writes keep their previous behavior.
+- Position cursors use composite comparisons on timestamp and sequence, matching
+  the existing display-order index and retaining strict/inclusive boundaries.
+- Schema v27 adds `idx_messages_uninvoked_local`, covering the latest-page
+  queue lookup without scanning every historical message. It includes scheduled
+  and indeterminate rows; the narrower immediate-delivery index remains intact.
+- WebSocket compression remains negotiated and enabled, but uses Bun's `3KB`
+  compressor rather than the default shared compressor. This lowered blocking
+  under the large-metadata replay workload. It can trade compression ratio for
+  CPU cost; wire bytes are now measured rather than assuming identical bandwidth.
+  Terminal and voice-proxy workloads still need separate production-like checks.
+
+Schema upgrade builds an index over existing messages and can delay startup on
+a large database. An older v26 binary will reject a v27 database: rollback must
+restore the pre-upgrade backup, not simply swap binaries.
+
+## Load-Test Results
+
+Full machine-readable results are in [long-session-stress-results.json](long-session-stress-results.json).
+Before is checkpoint `7c8dfb3f`; after includes all follow-up changes above.
+Runs were sequential on the same workstation, each for 15 seconds, with two
+sessions and a single-core Hub. Values below are before / after, in milliseconds
+except CPU and throughput. These are individual runs, not confidence intervals.
+
+| Scenario | ACK P95 | SSE P95 | Messages API P95 | Loop P99 | CPU % | ACK/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| 100k/session, mixed 80/s | 11.8 / 10.5 | 3.7 / 13.5 | 22.5 / 9.3 | 10.7 / 5.2 | 24.7 / 23.7 | 80 / 80 |
+| 500k/session, mixed 80/s | 52.6 / 19.1 | 14.3 / 12.9 | 86.4 / 19.6 | 66.0 / 15.1 | 52.1 / 39.4 | 79.9 / 80 |
+| 500k/session, replay 400/s | 1505 / 254 | 2594 / 139 | 125 / 153 | 1728 / 75.6 | 99.3 / 90.9 | 168 / 339 |
+| 100k/session, 2 clients/session, mixed 240/s | 932 / 625 | 405 / 641 | 1189 / 798 | 317 / 248 | 80.2 / 76.9 | 212 / 229 |
+
+All final runs had zero acknowledgement errors and zero probe errors. The
+baseline replay run had two probe errors and only three successful SSE samples,
+so that percentile has especially limited statistical value. Final replay still
+backpressured 922 of 6,000 offered operations; shared-client traffic backpressured
+172 of 3,600. Version mismatches are expected in the shared-client scenario.
+SSE latency did not improve universally, despite lower acknowledgement and
+event-loop latency. Do not describe this as a complete reconnect-timeout fix.
+
+A separate 30-second replay run acknowledged 9,008 operations (300/s), with
+zero errors, 2,992 backpressured operations, CPU 95.1%, ACK P95 258 ms, SSE P95
+1,281 ms and loop P99 213 ms. This confirms higher throughput but also exposes
+occasional stalls under sustained saturation. Its WebSocket traffic was 106.7 MB
+received by the driver and 125.2 MB sent, excluding HTTP/SSE. Shorter-run SSE
+results are not a guarantee of low tail latency over longer periods.
+
+Validation after the follow-up changes: 1,384 Hub tests passed, three skipped,
+zero failed; Hub and script typechecks and Hub build passed. Migration coverage
+checks v26->v27 and repeated reopen, index selection, scheduled/indeterminate
+queue visibility, and retained historical data. The load driver's interrupt
+cleanup is tested separately from the steady-state measurements.
+
+## Production Verification
+
+The synthetic load test does not model a remote tunnel, a slow browser's render
+loop, or every CLI agent. Extreme repeated metadata traffic still costs full
+JSON parsing and acknowledgements; avoiding that completely would require
+client coalescing or a negotiated delta protocol. Short local runs do not
+establish long-running stability or eliminate production reconnect timeouts.
 
 Before a production upgrade, back up the live SQLite database using SQLite's
 backup API, verify the 0.29.0-to-current migration on a copy, and preserve the

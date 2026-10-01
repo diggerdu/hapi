@@ -456,7 +456,7 @@ export function getMessagesByPosition(
 ): StoredMessage[] {
     const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(200, limit)) : 200
     const beforeClause = before
-        ? 'AND (COALESCE(invoked_at, created_at) < @beforeAt OR (COALESCE(invoked_at, created_at) = @beforeAt AND seq < @beforeSeq))'
+        ? 'AND (COALESCE(invoked_at, created_at), seq) < (@beforeAt, @beforeSeq)'
         : ''
     const rows = prepareCached(db, `
         SELECT *, COALESCE(invoked_at, created_at) AS position_at
@@ -487,19 +487,13 @@ export function getMessagesAfterPosition(
 ): StoredMessage[] {
     const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(200, limit)) : 200
     const untilClause = until
-        ? `AND (
-            COALESCE(invoked_at, created_at) < @untilAt
-            OR (COALESCE(invoked_at, created_at) = @untilAt AND seq <= @untilSeq)
-        )`
+        ? 'AND (COALESCE(invoked_at, created_at), seq) <= (@untilAt, @untilSeq)'
         : ''
     const rows = prepareCached(db, `
         SELECT *, COALESCE(invoked_at, created_at) AS position_at
         FROM messages
         WHERE session_id = @sessionId
-          AND (
-            COALESCE(invoked_at, created_at) > @afterAt
-            OR (COALESCE(invoked_at, created_at) = @afterAt AND seq > @afterSeq)
-          )
+          AND (COALESCE(invoked_at, created_at), seq) > (@afterAt, @afterSeq)
           ${untilClause}
         ORDER BY position_at ASC, seq ASC
         LIMIT @limit

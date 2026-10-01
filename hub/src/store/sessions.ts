@@ -55,6 +55,18 @@ import { updateVersionedField } from './versionedUpdates'
 const PARSE_IDENTITY_FIELDS = ['path', 'host'] as const
 
 const ROUTING_FIELDS = ['flavor', 'machineId'] as const
+const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
+
+function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
+    if (!isPlainObject(incoming)) return incoming
+    const next = { ...incoming }
+    const existing = isPlainObject(current) ? current : {}
+    for (const key of HUB_OWNED_METADATA_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(existing, key)) next[key] = existing[key]
+        else delete next[key]
+    }
+    return next
+}
 
 const SIMPLE_RESUME_TOKENS = [
     'claudeSessionId',
@@ -414,7 +426,7 @@ export function updateSessionMetadata(
     metadata: unknown,
     expectedVersion: number,
     namespace: string,
-    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; skipUnchanged?: boolean }
+    options?: { touchUpdatedAt?: boolean; allowUnarchive?: boolean; skipUnchanged?: boolean; preserveHubOwnedFields?: boolean }
 ): VersionedUpdateResult<unknown | null> {
     const now = Date.now()
     const touchUpdatedAt = options?.touchUpdatedAt !== false
@@ -446,7 +458,12 @@ export function updateSessionMetadata(
             }
 
             const prior = existing.metadata
-            let merged = mergeSessionMetadata(prior, metadata)
+            // CLI writes preserve Hub-owned keys against the live row, not a
+            // potentially stale socket access-cache snapshot.
+            const incoming = options?.preserveHubOwnedFields
+                ? preserveHubOwnedMetadata(metadata, prior)
+                : metadata
+            let merged = mergeSessionMetadata(prior, incoming)
 
             // #1911 M1: unauthorized un-archive of hub-archived rows.
             // Return success + merge-preserved archive fields — NOT version-mismatch

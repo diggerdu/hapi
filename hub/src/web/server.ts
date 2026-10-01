@@ -459,7 +459,9 @@ export async function startWebServer(options: {
             // nothing in Bun — each send() opts in — so open() below also
             // makes compression the default for flagless sends. See
             // wsCompression.ts for the contract.
-            perMessageDeflate: true,
+            // Use a bounded, low-cost compressor: synchronous compression of
+            // large metadata acknowledgements otherwise stalls the Hub loop.
+            perMessageDeflate: { compress: '3KB', decompress: true },
             open(ws: unknown) {
                 applyDefaultWsCompression(ws as ServerWebSocket<unknown>)
                 const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean }>

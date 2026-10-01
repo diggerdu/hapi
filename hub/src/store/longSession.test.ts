@@ -17,6 +17,26 @@ afterEach(() => {
 })
 
 describe('unchanged session synchronization', () => {
+    it('protects live Hub-owned fields even when a CLI submits an old snapshot', () => {
+        const store = createStore()
+        const session = store.sessions.getOrCreateSession('owned',
+            { name: 'old', supersededBySessionId: 'live', opencodeClearOperation: { state: 'pending' } }, null, 'owner')
+        const options = { skipUnchanged: true, preserveHubOwnedFields: true }
+        const result = store.sessions.updateSessionMetadata(session.id,
+            { name: 'new', supersededBySessionId: 'forged', opencodeClearOperation: null },
+            session.metadataVersion, 'owner', options)
+        expect(result).toMatchObject({ result: 'success', value: {
+            name: 'new', supersededBySessionId: 'live', opencodeClearOperation: { state: 'pending' }
+        } })
+        const live = store.sessions.getSession(session.id)!
+        store.sessions.updateSessionMetadata(session.id, { name: 'new' }, live.metadataVersion, 'owner')
+        const cleared = store.sessions.getSession(session.id)!
+        expect(store.sessions.updateSessionMetadata(session.id, live.metadata,
+            cleared.metadataVersion, 'owner', options)).toMatchObject({
+            result: 'success', version: cleared.metadataVersion, value: { name: 'new' }
+        })
+    })
+
     it('acknowledges equivalent merged metadata without advancing version, activity or sequence', () => {
         const store = createStore()
         const metadata = { path: '/tmp', host: 'test', codexSessionId: 'thread', name: 'long session' }

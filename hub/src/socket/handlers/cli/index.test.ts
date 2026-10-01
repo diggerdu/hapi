@@ -201,7 +201,7 @@ describe('cli handler session-access memo', () => {
         store.close()
     })
 
-    it('update-metadata resolves the session fresh so hub-owned fields survive a warm memo', () => {
+    it('update-metadata preserves live hub-owned fields without rereading a warm memo', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('memo-meta', null, null, 'default')
 
@@ -237,8 +237,8 @@ describe('cli handler session-access memo', () => {
         expect(live).not.toBeNull()
 
         // The client's metadata write omits the hub-owned key. A stale memo
-        // base (metadata: null) would strip it from the merged row; a fresh
-        // resolve preserves it from the live row.
+        // base (metadata: null) would strip it; the store transaction now
+        // preserves it from the live row.
         let ack: unknown
         socket.trigger('update-metadata', {
             sid: session.id,
@@ -246,8 +246,7 @@ describe('cli handler session-access memo', () => {
             expectedVersion: live!.metadataVersion
         }, (response: unknown) => { ack = response })
 
-        // The write path bypassed the memo (fresh resolve).
-        expect(byNamespaceCalls).toBe(2)
+        expect(byNamespaceCalls).toBe(1)
         expect((ack as { result: string }).result).toBe('success')
 
         const stored = store.sessions.getSession(session.id)
