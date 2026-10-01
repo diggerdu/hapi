@@ -182,6 +182,69 @@ checks v26->v27 and repeated reopen, index selection, scheduled/indeterminate
 queue visibility, and retained historical data. The load driver's interrupt
 cleanup is tested separately from the steady-state measurements.
 
+## Compact Synchronization Acknowledgements
+
+Session metadata/state requests may opt in with `compactAck: true`. If the
+live version matches and the persisted value equals the submitted value, the
+Hub replies `{ result: 'unchanged', version }` instead of echoing the JSON
+value. The version does not advance. CLI session clients opt in; requests
+without the flag retain complete acknowledgements.
+
+This is not simply a test of whether the database was written: Hub-owned field
+preservation, metadata merging or archive protection can leave storage unchanged
+while making the submitted value different. Those cases still return the full
+persisted value. Stale versions always return a full `version-mismatch` response,
+and changed writes still return full success responses and broadcasts.
+
+The CLI accepts the compact response only for the exact version submitted by
+that operation. If its version still matches, it validates and applies the
+submitted value through the normal success path, keeping the same version.
+If a newer broadcast arrived meanwhile, the cache is left intact. Unsolicited compact
+responses, malformed versions and wrong-version confirmations are rejected.
+Machine metadata/state protocol and frontend/native API behavior are unchanged.
+
+Add `--compact` to the load driver to exercise this path. The request still
+contains the complete JSON value; this reduces acknowledgement serialization,
+compression and transmission but does not eliminate request parsing. Effective
+throughput remains subject to client-side backpressure and the full incoming
+payload. Benchmark data for this follow-up is recorded separately from the
+original compression/index results.
+
+Results: [compact-ack-stress-results.json](compact-ack-stress-results.json).
+Two sessions with 500k historical messages each, synthetic large metadata,
+one-core Hub, 400 offered operations/s for 30 seconds. Full-ack and compact-ack
+runs were sequential, without concurrent test suites. Requests still contain
+the same complete values; the acknowledgement mode is the changed variable.
+
+| Metric | Full ACK | Compact ACK |
+| --- | --- | --- |
+| Acknowledged operations/s | 329.5 | 400 |
+| Backpressured / offered | 2,114 / 12,000 | 0 / 12,000 |
+| Hub CPU, one-core percentage | 94.0% | 51.3% |
+| ACK P95 | 214 ms | 13.1 ms |
+| SSE handshake P95 | 203 ms | 10.7 ms |
+| Event-loop delay P99 | 87.0 ms | 2.95 ms |
+| Hub->CLI WebSocket wire bytes | 120.9 MB | 0.109 MB |
+| Acknowledgement / probe errors | 0 / 0 | 0 / 0 |
+
+The compact replay run received all 12,000 confirmations with both metadata and
+state versions unchanged. CLI->Hub wire traffic was 157.4 MB: parsing full
+incoming values remains a bottleneck at higher rates. These are short local
+synthetic runs, not long-term or public-tunnel latency guarantees.
+
+Additional compact-mode checks: genuine mixed writes at 80/s with 500k messages
+per session completed without backpressure or errors. Shared-client traffic
+at 240/s acknowledged 232/s, with 120 backpressured operations and 850 expected
+CAS version conflicts; SSE P95 remained 211 ms. Compact acknowledgements do
+not address contention that requires full current-state replies or large
+changed-value broadcasts.
+
+The complete CLI, Hub, web, shared and relay suites passed. Final affected
+CLI/session/machine tests: 78 passed. All workspace typechecks, load-script
+typecheck and Hub build passed. Regression cases cover opt-in behavior,
+stale versions, real changes, merged Hub-owned values, wrong-version responses,
+incomplete local caches and a newer broadcast arriving before a compact ack.
+
 ## Production Verification
 
 The synthetic load test does not model a remote tunnel, a slow browser's render

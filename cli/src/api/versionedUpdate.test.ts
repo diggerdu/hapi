@@ -29,6 +29,34 @@ const baseOptions = (
 });
 
 describe('applyVersionedAck', () => {
+    it('accepts a negotiated unchanged ack without overwriting a newer cached broadcast', () => {
+        const state: TestState = { value: 'newer broadcast', version: 10 };
+        applyVersionedAck({ result: 'unchanged', version: 3 }, baseOptions(state, [], {
+            unchanged: { version: 3, value: 'submitted', isCurrent: () => state.version === 3 }
+        }));
+        expect(state).toEqual({ value: 'newer broadcast', version: 10 });
+    });
+
+    it('rejects unsolicited, malformed and wrong-version unchanged acknowledgements', () => {
+        const state: TestState = { value: 'existing', version: 3 };
+        expect(() => applyVersionedAck({ result: 'unchanged', version: 3 }, baseOptions(state, [])))
+            .toThrow('Invalid update-metadata response');
+        for (const version of [4, '3', NaN, Infinity, 3.5, undefined]) {
+            expect(() => applyVersionedAck({ result: 'unchanged', version },
+                baseOptions(state, [], { unchanged: { version: 3, value: 'submitted', isCurrent: () => true } })))
+                .toThrow('Invalid update-metadata response');
+        }
+        expect(state).toEqual({ value: 'existing', version: 3 });
+    });
+
+    it('validates and applies the submitted value when the local cache is incomplete', () => {
+        const state: TestState = { value: null, version: 3 };
+        applyVersionedAck({ result: 'unchanged', version: 3 }, baseOptions(state, [], {
+            unchanged: { version: 3, value: 'submitted', isCurrent: () => true }
+        }));
+        expect(state).toEqual({ value: 'submitted', version: 3 });
+    });
+
     it('applies value and version on success', () => {
         const state: TestState = { value: null, version: 0 };
         const logInvalids: Array<{ context: AckResult; version: number }> = [];

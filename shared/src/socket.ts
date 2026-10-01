@@ -182,6 +182,12 @@ export const UpdateSchema = z.object({
 export type Update = z.infer<typeof UpdateSchema>
 
 export type UpdateMetadataAck = {
+    // Only for an opted-in, matching-version write whose persisted value
+    // equals the submitted value. No version advance; the submitted value can
+    // be reused unless a newer broadcast arrived while awaiting this ack.
+    result: 'unchanged'
+    version: number
+} | {
     result: 'error'
     reason?: SocketErrorReason
 } | {
@@ -195,6 +201,9 @@ export type UpdateMetadataAck = {
 }
 
 export type UpdateStateAck = {
+    result: 'unchanged'
+    version: number
+} | {
     result: 'error'
     reason?: SocketErrorReason
 } | {
@@ -278,8 +287,8 @@ export interface ClientToServerEvents {
     /** Native shared-engine queue projection. null = positively acknowledged removal. */
     'native-queue-message': (data: { sid: string; localId: string; text: string | null }) => void
     'messages-steer-state': (data: { sid: string; localIds: string[]; state: 'queued' | 'dispatching' }, cb: (response: { ok: boolean }) => void) => void
-    'update-metadata': (data: { sid: string; expectedVersion: number; metadata: unknown }, cb: (answer: UpdateMetadataAck) => void) => void
-    'update-state': (data: { sid: string; expectedVersion: number; agentState: unknown | null }, cb: (answer: UpdateStateAck) => void) => void
+    'update-metadata': (data: { sid: string; expectedVersion: number; metadata: unknown; compactAck?: boolean }, cb: (answer: UpdateMetadataAck) => void) => void
+    'update-state': (data: { sid: string; expectedVersion: number; agentState: unknown | null; compactAck?: boolean }, cb: (answer: UpdateStateAck) => void) => void
     'machine-alive': (data: { machineId: string; time: number; health?: unknown }) => void
     'machine-update-metadata': (data: { machineId: string; expectedVersion: number; metadata: unknown }, cb: (answer: MachineUpdateMetadataAck) => void) => void
     'machine-update-state': (data: { machineId: string; expectedVersion: number; runnerState: unknown | null }, cb: (answer: MachineUpdateStateAck) => void) => void

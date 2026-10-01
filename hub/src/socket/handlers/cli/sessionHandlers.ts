@@ -1,6 +1,7 @@
 import type { ClientToServerEvents } from '@hapi/protocol'
 import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
+import { isDeepStrictEqual } from 'node:util'
 import type { CopilotAgentMode } from '@hapi/protocol'
 import type { AgentState, CodexCollaborationMode, Metadata, PermissionMode } from '@hapi/protocol/types'
 import { getReasoningStreamId, isRedundantGoalStatusEventContent } from '@hapi/protocol/messages'
@@ -59,13 +60,15 @@ const messageSchema = z.object({
 const updateMetadataSchema = z.object({
     sid: z.string(),
     expectedVersion: z.number().int(),
-    metadata: z.unknown()
+    metadata: z.unknown(),
+    compactAck: z.boolean().optional()
 })
 
 const updateStateSchema = z.object({
     sid: z.string(),
     expectedVersion: z.number().int(),
-    agentState: z.unknown().nullable()
+    agentState: z.unknown().nullable(),
+    compactAck: z.boolean().optional()
 })
 
 export type SessionHandlersDeps = {
@@ -255,7 +258,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const { sid, metadata, expectedVersion } = parsed.data
+        const { sid, metadata, expectedVersion, compactAck } = parsed.data
         const sessionAccess = resolveSessionAccess(sid)
         if (!sessionAccess.ok) {
             cb({ result: 'error', reason: sessionAccess.reason })
@@ -270,7 +273,11 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             { skipUnchanged: true, preserveHubOwnedFields: true }
         )
         if (result.result === 'success') {
-            cb({ result: 'success', version: result.version, metadata: result.value })
+            if (compactAck && result.version === expectedVersion && isDeepStrictEqual(result.value, metadata)) {
+                cb({ result: 'unchanged', version: result.version })
+            } else {
+                cb({ result: 'success', version: result.version, metadata: result.value })
+            }
         } else if (result.result === 'version-mismatch') {
             cb({ result: 'version-mismatch', version: result.version, metadata: result.value })
         } else {
@@ -322,7 +329,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             return
         }
 
-        const { sid, agentState, expectedVersion } = parsed.data
+        const { sid, agentState, expectedVersion, compactAck } = parsed.data
         const sessionAccess = resolveSessionAccess(sid)
         if (!sessionAccess.ok) {
             cb({ result: 'error', reason: sessionAccess.reason })
@@ -337,7 +344,11 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
             { skipUnchanged: true }
         )
         if (result.result === 'success') {
-            cb({ result: 'success', version: result.version, agentState: result.value })
+            if (compactAck && result.version === expectedVersion && isDeepStrictEqual(result.value, agentState ?? null)) {
+                cb({ result: 'unchanged', version: result.version })
+            } else {
+                cb({ result: 'success', version: result.version, agentState: result.value })
+            }
         } else if (result.result === 'version-mismatch') {
             cb({ result: 'version-mismatch', version: result.version, agentState: result.value })
         } else {

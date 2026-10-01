@@ -53,6 +53,45 @@ function reasoningTextOf(message: { content: unknown }): string {
 }
 
 describe('cli session handlers', () => {
+    it.each(['update-metadata', 'update-state'])('only compacts identical %s acknowledgements at the live version', event => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('compact', { path: '/tmp', host: 'test' }, null, 'default')
+            const socket = new FakeSocket()
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {}
+            })
+            const version = event === 'update-metadata' ? session.metadataVersion : session.agentStateVersion
+            const payload = event === 'update-metadata' ? { metadata: session.metadata } : { agentState: null }
+            let response: unknown
+            const send = (expectedVersion: number, value: Record<string, unknown> = payload) => socket.trigger(event,
+                { sid: session.id, expectedVersion, compactAck: true, ...value }, answer => { response = answer })
+            send(version)
+            expect(response).toEqual({ result: 'unchanged', version })
+            send(version + 1)
+            expect(response).toMatchObject({ result: 'version-mismatch', version, ...payload })
+            send(version, event === 'update-metadata' ? { metadata: { ...session.metadata as object, name: 'changed' } }
+                : { agentState: { requests: {} } })
+            expect(response).toMatchObject({ result: 'success', version: version + 1 })
+        } finally { store.close() }
+    })
+
+    it('returns the full merged value when unchanged storage still differs from the CLI snapshot', () => {
+        const store = new Store(':memory:')
+        try {
+            const metadata = { path: '/tmp', host: 'test', supersededBySessionId: 'successor' }
+            const session = store.sessions.getOrCreateSession('compact-merged', metadata, null, 'default')
+            const socket = new FakeSocket()
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: () => ({ ok: true, value: session }), emitAccessError() {}
+            })
+            let response: unknown
+            socket.trigger('update-metadata', { sid: session.id, expectedVersion: session.metadataVersion,
+                compactAck: true, metadata: { path: '/tmp', host: 'test' } }, answer => { response = answer })
+            expect(response).toEqual({ result: 'success', version: session.metadataVersion, metadata })
+        } finally { store.close() }
+    })
+
     it.each(['update-metadata', 'update-state'])('acknowledges unchanged %s without broadcasting', event => {
         const store = new Store(':memory:')
         try {

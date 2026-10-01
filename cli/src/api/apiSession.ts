@@ -1394,15 +1394,19 @@ export class ApiSessionClient extends EventEmitter {
                 const current = this.metadata ?? ({} as Metadata)
                 const updated = handler(current)
 
+                const expectedVersion = this.metadataVersion
                 const answer = await this.socket.emitWithAck('update-metadata', {
                     sid: this.sessionId,
-                    expectedVersion: this.metadataVersion,
+                    expectedVersion,
+                    compactAck: true,
                     metadata: updated
                 }) as unknown
 
                 try {
                     applyVersionedAck(answer, {
                         valueKey: 'metadata',
+                        unchanged: { version: expectedVersion, value: updated,
+                            isCurrent: () => this.metadataVersion === expectedVersion },
                         parseValue: (value) => {
                             const parsed = MetadataSchema.safeParse(value)
                             return parsed.success ? parsed.data : null
@@ -1468,14 +1472,18 @@ export class ApiSessionClient extends EventEmitter {
                 const current = this.agentState ?? ({} as AgentState)
                 const updated = handler(current)
 
+                const expectedVersion = this.agentStateVersion
                 const answer = await this.socket.emitWithAck('update-state', {
                     sid: this.sessionId,
-                    expectedVersion: this.agentStateVersion,
+                    expectedVersion,
+                    compactAck: true,
                     agentState: updated
                 }) as unknown
 
                 applyVersionedAck(answer, {
                     valueKey: 'agentState',
+                    unchanged: { version: expectedVersion, value: updated,
+                        isCurrent: () => this.agentStateVersion === expectedVersion },
                     parseValue: (value) => {
                         const parsed = AgentStateSchema.safeParse(value)
                         return parsed.success ? parsed.data : null

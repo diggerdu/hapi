@@ -1,0 +1,303 @@
+{
+  "date": "2026-10-01",
+  "baselineCommit": "d25f58c6",
+  "environment": {
+    "node": "v24.15.0",
+    "bun": "1.3.12",
+    "hubCpus": 1,
+    "hubCpuAffinity": 0
+  },
+  "note": "Sequential local runs, without concurrent test suites; before and after differ in compact acknowledgement opt-in.",
+  "before": {
+    "options": {
+      "messages": 500000,
+      "sessions": 2,
+      "clients": 1,
+      "rate": 400,
+      "duration": 30,
+      "mode": "replay",
+      "compact": false
+    },
+    "offered": 12000,
+    "sent": 9886,
+    "backpressured": 2114,
+    "acknowledged": 9886,
+    "mismatches": 0,
+    "errors": 0,
+    "probeErrors": 0,
+    "probeErrorReasons": {},
+    "websocketWireBytes": {
+      "received": 120920214,
+      "sent": 142116531
+    },
+    "acknowledgedPerSecond": 329.53333333333336,
+    "acknowledgements": {
+      "count": 9886,
+      "p50Ms": 104.90628099999958,
+      "p95Ms": 214.15673600000082,
+      "p99Ms": 1135.8688800000018,
+      "maxMs": 2239.9081160000023
+    },
+    "sseHandshake": {
+      "count": 70,
+      "p50Ms": 17.805703999998514,
+      "p95Ms": 203.24192699999912,
+      "p99Ms": 2133.7172580000006,
+      "maxMs": 2133.7172580000006
+    },
+    "messagesApi": {
+      "count": 70,
+      "p50Ms": 24.009229000000232,
+      "p95Ms": 712.2221519999985,
+      "p99Ms": 1234.8702420000009,
+      "maxMs": 1234.8702420000009
+    },
+    "stats": {
+      "requestId": 2,
+      "type": "stats",
+      "durationMs": 30181.436237,
+      "cpuPercent": 94.0203136032754,
+      "maxRssMiB": 296.8046875,
+      "eventLoopDelay": {
+        "count": 1260,
+        "p50Ms": 2.3873899999998685,
+        "p95Ms": 43.33609199999955,
+        "p99Ms": 86.95263400000113,
+        "maxMs": 1208.2447229999998
+      },
+      "sessions": [
+        {
+          "id": "11fe5405-6b21-4f1b-b257-8d0a19552de9",
+          "messages": 500000,
+          "metadataVersion": 1,
+          "stateVersion": 1
+        },
+        {
+          "id": "77180f35-d27e-434d-a3c9-8c6f3358eb18",
+          "messages": 500000,
+          "metadataVersion": 1,
+          "stateVersion": 1
+        }
+      ]
+    }
+  },
+  "after": {
+    "options": {
+      "messages": 500000,
+      "sessions": 2,
+      "clients": 1,
+      "rate": 400,
+      "duration": 30,
+      "mode": "replay",
+      "compact": true
+    },
+    "offered": 12000,
+    "sent": 12000,
+    "backpressured": 0,
+    "acknowledged": 12000,
+    "mismatches": 0,
+    "errors": 0,
+    "probeErrors": 0,
+    "probeErrorReasons": {},
+    "websocketWireBytes": {
+      "received": 109408,
+      "sent": 157366596
+    },
+    "acknowledgedPerSecond": 400,
+    "acknowledgements": {
+      "count": 12000,
+      "p50Ms": 5.27245800000037,
+      "p95Ms": 13.076933000000281,
+      "p99Ms": 29.184970999999678,
+      "maxMs": 64.7181819999987
+    },
+    "sseHandshake": {
+      "count": 114,
+      "p50Ms": 3.656731999999465,
+      "p95Ms": 10.708235999999488,
+      "p99Ms": 17.68380100000013,
+      "maxMs": 20.196319999999105
+    },
+    "messagesApi": {
+      "count": 114,
+      "p50Ms": 7.9467380000005505,
+      "p95Ms": 17.734991999999693,
+      "p99Ms": 22.025026000000253,
+      "maxMs": 30.4261549999992
+    },
+    "stats": {
+      "requestId": 2,
+      "type": "stats",
+      "durationMs": 30011.485635,
+      "cpuPercent": 51.30405801052241,
+      "maxRssMiB": 208.59765625,
+      "eventLoopDelay": {
+        "count": 2901,
+        "p50Ms": 0.1874660000030417,
+        "p95Ms": 1.7330939999992552,
+        "p99Ms": 2.9485330000024987,
+        "maxMs": 22.91744800000015
+      },
+      "sessions": [
+        {
+          "id": "74891c50-23b3-4412-a2aa-c8cff7ed5b04",
+          "messages": 500000,
+          "metadataVersion": 1,
+          "stateVersion": 1
+        },
+        {
+          "id": "d5f95732-1bfa-47f6-af3f-46318df1e1ba",
+          "messages": 500000,
+          "metadataVersion": 1,
+          "stateVersion": 1
+        }
+      ]
+    }
+  },
+  "mixed": {
+    "options": {
+      "messages": 500000,
+      "sessions": 2,
+      "clients": 1,
+      "rate": 80,
+      "duration": 15,
+      "mode": "mixed",
+      "compact": true
+    },
+    "offered": 1200,
+    "sent": 1200,
+    "backpressured": 0,
+    "acknowledged": 1200,
+    "mismatches": 0,
+    "errors": 0,
+    "probeErrors": 0,
+    "probeErrorReasons": {},
+    "websocketWireBytes": {
+      "received": 9168203,
+      "sent": 6536745
+    },
+    "acknowledgedPerSecond": 80,
+    "acknowledgements": {
+      "count": 1200,
+      "p50Ms": 3.7877300000000105,
+      "p95Ms": 16.03805999999895,
+      "p99Ms": 22.436068999999407,
+      "maxMs": 31.030022999999346
+    },
+    "sseHandshake": {
+      "count": 58,
+      "p50Ms": 1.9266509999997652,
+      "p95Ms": 8.563120000000708,
+      "p99Ms": 15.34053300000005,
+      "maxMs": 15.34053300000005
+    },
+    "messagesApi": {
+      "count": 58,
+      "p50Ms": 4.444446000000426,
+      "p95Ms": 18.743337999998403,
+      "p99Ms": 33.805490999999165,
+      "maxMs": 33.805490999999165
+    },
+    "stats": {
+      "requestId": 2,
+      "type": "stats",
+      "durationMs": 15014.953899999999,
+      "cpuPercent": 35.240827479330456,
+      "maxRssMiB": 233.22265625,
+      "eventLoopDelay": {
+        "count": 1276,
+        "p50Ms": 0.5748409999996511,
+        "p95Ms": 8.054323000000295,
+        "p99Ms": 11.878726000000825,
+        "maxMs": 22.78519000000051
+      },
+      "sessions": [
+        {
+          "id": "0e5dd9c1-0379-443d-bdb7-b8c234288f2b",
+          "messages": 500240,
+          "metadataVersion": 121,
+          "stateVersion": 121
+        },
+        {
+          "id": "a3fc8144-f760-43f5-955c-ec525899f5dc",
+          "messages": 500240,
+          "metadataVersion": 121,
+          "stateVersion": 121
+        }
+      ]
+    }
+  },
+  "shared": {
+    "options": {
+      "messages": 100000,
+      "sessions": 2,
+      "clients": 2,
+      "rate": 240,
+      "duration": 15,
+      "mode": "mixed",
+      "compact": true
+    },
+    "offered": 3600,
+    "sent": 3480,
+    "backpressured": 120,
+    "acknowledged": 3480,
+    "mismatches": 850,
+    "errors": 0,
+    "probeErrors": 0,
+    "probeErrorReasons": {},
+    "websocketWireBytes": {
+      "received": 68014093,
+      "sent": 4582410
+    },
+    "acknowledgedPerSecond": 232,
+    "acknowledgements": {
+      "count": 3480,
+      "p50Ms": 9.6686380000001,
+      "p95Ms": 567.6808440000004,
+      "p99Ms": 679.794586,
+      "maxMs": 750.6221669999995
+    },
+    "sseHandshake": {
+      "count": 44,
+      "p50Ms": 2.722256999999445,
+      "p95Ms": 211.34369399999923,
+      "p99Ms": 509.68642,
+      "maxMs": 509.68642
+    },
+    "messagesApi": {
+      "count": 44,
+      "p50Ms": 7.983068999999887,
+      "p95Ms": 368.8193790000005,
+      "p99Ms": 1334.4626270000026,
+      "maxMs": 1334.4626270000026
+    },
+    "stats": {
+      "requestId": 2,
+      "type": "stats",
+      "durationMs": 15588.783459,
+      "cpuPercent": 70.49873409881201,
+      "maxRssMiB": 165.28125,
+      "eventLoopDelay": {
+        "count": 881,
+        "p50Ms": 0.605083000000036,
+        "p95Ms": 12.717291000000841,
+        "p99Ms": 139.1582010000002,
+        "maxMs": 733.4256110000006
+      },
+      "sessions": [
+        {
+          "id": "8c377d5b-bb2f-40e6-89e3-aad9f2733763",
+          "messages": 100701,
+          "metadataVersion": 137,
+          "stateVersion": 137
+        },
+        {
+          "id": "24f2bfdb-833b-47c5-ab1d-005e79cab213",
+          "messages": 100694,
+          "metadataVersion": 134,
+          "stateVersion": 135
+        }
+      ]
+    }
+  }
+}

@@ -9,7 +9,7 @@ import { SignJWT } from 'jose'
 import { io, type Socket } from 'socket.io-client'
 
 const { values } = parseArgs({ options: {
-    worker: { type: 'boolean' }, messages: { type: 'string', default: '100000' },
+    worker: { type: 'boolean' }, compact: { type: 'boolean' }, messages: { type: 'string', default: '100000' },
     sessions: { type: 'string', default: '2' }, clients: { type: 'string', default: '1' },
     rate: { type: 'string', default: '80' }, duration: { type: 'string', default: '15' },
     mode: { type: 'string', default: 'mixed' }, cpu: { type: 'string' }, profile: { type: 'string' }
@@ -24,7 +24,7 @@ function integer(value: string | undefined, name: string): number {
 const options = {
     messages: integer(values.messages, 'messages'), sessions: integer(values.sessions, 'sessions'),
     clients: integer(values.clients, 'clients'), rate: integer(values.rate, 'rate'),
-    duration: integer(values.duration, 'duration'), mode: values.mode!
+    duration: integer(values.duration, 'duration'), mode: values.mode!, compact: values.compact === true
 }
 if (!['replay', 'mixed'].includes(options.mode)) throw new Error('Mode must be replay or mixed')
 
@@ -278,11 +278,13 @@ async function driver(): Promise<void> {
                 sent++
                 const operation = options.mode === 'replay' ? sequence % 2 : sequence % 5
                 const timestamp = performance.now()
+                const expectedVersion = operation === 0 ? fixture.metadataVersion : fixture.stateVersion
                 let acknowledgement: Promise<Ack>
                 if (operation === 0 || operation === 1) {
                     const metadata = operation === 0
                     acknowledgement = fixture.socket.timeout(5000).emitWithAck(metadata ? 'update-metadata' : 'update-state', {
-                        sid: fixture.id, expectedVersion: metadata ? fixture.metadataVersion : fixture.stateVersion,
+                        sid: fixture.id, expectedVersion,
+                        compactAck: options.compact,
                         ...(metadata ? { metadata: options.mode === 'mixed' ? { ...fixture.metadata, name: `update-${sequence}` } : fixture.metadata }
                             : { agentState: options.mode === 'mixed' ? { requests: {}, counter: sequence } : { requests: {} } })
                     })
@@ -300,7 +302,8 @@ async function driver(): Promise<void> {
                     acknowledged++
                     ackTimes.push(performance.now() - timestamp)
                     if (response.result === 'version-mismatch') mismatches++
-                    else if (response.result !== 'success') errors++
+                    else if (response.result === 'unchanged' && (!options.compact || response.version !== expectedVersion)) errors++
+                    else if (response.result !== 'success' && response.result !== 'unchanged') errors++
                     if (operation === 0 && response.version !== undefined) fixture.metadataVersion = Math.max(fixture.metadataVersion, response.version)
                     if (operation === 1 && response.version !== undefined) fixture.stateVersion = Math.max(fixture.stateVersion, response.version)
                 }).catch(() => { errors++ }).finally(() => { fixture.inFlight--; pending.delete(promise) })

@@ -171,6 +171,45 @@ function triggerIncomingUserMessage(
 }
 
 describe('ApiSessionClient lazy materialization', () => {
+    it('fills incomplete local metadata from the submitted value on a compact acknowledgement', async () => {
+        socketHarness.sockets.length = 0
+        axiosHarness.get.mockResolvedValue({ data: { messages: [] } })
+        const client = new ApiSessionClient('token', createSession({ namespace: 'default', metadataVersion: 1 }))
+        socketHarness.sockets[0].emitWithAckImpl = async event => event === 'update-metadata'
+            ? { result: 'unchanged', version: 1 } : {}
+        try {
+            client.updateMetadata(() => ({ path: '/tmp', host: 'test' }))
+            await client.flush({ timeoutMs: 1000 })
+            expect(client.getMetadata()).toMatchObject({ path: '/tmp', host: 'test' })
+        } finally { client.close() }
+    })
+
+    it('requests compact metadata acks and retains a newer broadcast received before the ack', async () => {
+        socketHarness.sockets.length = 0
+        axiosHarness.get.mockResolvedValue({ data: { messages: [] } })
+        const session = createSession({ namespace: 'default',
+            metadata: { path: '/tmp', host: 'test', name: 'original' }, metadataVersion: 1 })
+        const client = new ApiSessionClient('token', session)
+        const socket = socketHarness.sockets[0]
+        const pending = deferred<unknown>()
+        let requested = false
+        socket.emitWithAckImpl = async (event, payload) => {
+            if (event !== 'update-metadata') return {}
+            expect(payload).toMatchObject({ compactAck: true, expectedVersion: 1 })
+            requested = true
+            return pending.promise
+        }
+        try {
+            client.updateMetadata(metadata => ({ ...metadata }))
+            await vi.waitFor(() => expect(requested).toBe(true))
+            socket.trigger('update', { body: { t: 'update-session', sid: session.id,
+                metadata: { version: 2, value: { ...session.metadata, name: 'newer' } }, agentState: null } })
+            pending.resolve({ result: 'unchanged', version: 1 })
+            await client.flush({ timeoutMs: 1000 })
+            expect(client.getMetadata()?.name).toBe('newer')
+        } finally { client.close() }
+    })
+
     it('does not connect or materialize without a real user message', async () => {
         socketHarness.sockets.length = 0
         const materialize = vi.fn(async () => createSession())
