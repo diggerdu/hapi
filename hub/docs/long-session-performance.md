@@ -255,5 +255,34 @@ establish long-running stability or eliminate production reconnect timeouts.
 
 Before a production upgrade, back up the live SQLite database using SQLite's
 backup API, verify the 0.29.0-to-current migration on a copy, and preserve the
-old image and database backup for rollback. This development work has not
-changed or restarted the production Hub.
+old image and database backup for rollback. Initial development did not change
+the production Hub; the subsequent deployment is recorded below.
+
+## Production Deployment
+
+On 2026-10-01 the Hub at `https://h.642222.xyz` was upgraded from 0.29.0 to
+the optimized 0.30.7 application commit `f90b46a0`. The runtime image is
+`local/hapi:0.30.7-f90b46a0`, with the existing data, secrets, security settings
+and Cloudflare Tunnel retained. CLI runners were not automatically upgraded;
+they benefit from the Hub optimizations but do not yet request compact ACKs.
+
+The v25 production database backup was tested locally with the new Store and
+compiled binary before cutover. A final pre-upgrade backup retained six sessions
+and 178,769 messages. Live migration reached v27; final verification found
+six sessions, 178,814 messages, integrity `ok`, zero foreign-key violations,
+and unchanged JWT-secret and owner-ID files. The old image and final v25 backup
+remain available for rollback. Session counts can grow with ongoing traffic.
+
+The container is healthy. Final five public gzip SSE handshakes took
+72.3-124.9 ms (median 117.5 ms), and the public latest-message page took 98.4 ms.
+Unauthenticated API access returned 401. These are spot checks, not an SLA.
+Residual stalls remain: the same final probe's origin SSE took 5.1-6.9 seconds,
+and CPU previously sampled at 107%. An earlier origin probe was fast (median
+6.6 ms), while another public message request took 4.8 seconds. Deployment is
+verified, but real-workload event-loop saturation is not fully resolved.
+
+A temporary CPU-profiling configuration was removed and absence of
+`BUN_OPTIONS` was verified. No application profile flushed during shutdown.
+A native perf sample contained mostly unresolved application symbols, so it
+does not establish the next JavaScript hotspot. The deployment runbook and
+rollback procedure are in the VPS workspace's `operations/hapi/README.md`.
