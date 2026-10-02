@@ -53,6 +53,39 @@ function reasoningTextOf(message: { content: unknown }): string {
 }
 
 describe('cli session handlers', () => {
+    it('drops persisted transcript replays before decoding and repeating side effects', () => {
+        const store = new Store(':memory:')
+        try {
+            const session = store.sessions.getOrCreateSession('replay', {}, null, 'default')
+            const sibling = store.sessions.getOrCreateSession('replay-other', {}, null, 'default')
+            const socket = new FakeSocket()
+            const events: SyncEvent[] = []
+            const progress = mock(() => {})
+            const activity = mock(() => {})
+            registerSessionHandlers(socket as unknown as CliSocketWithData, {
+                store, resolveSessionAccess: sid => ({ ok: true, value: sid === session.id ? session : sibling }),
+                emitAccessError() {}, onWebappEvent: event => events.push(event),
+                onAgentProgress: progress, onSessionActivity: activity
+            })
+            const payload = { sid: session.id, localId: 'stable-id', message: {
+                role: 'user', content: { type: 'text', text: 'first-write' }
+            } }
+            socket.trigger('message', payload)
+            const original = store.messages.getAllMessages(session.id)[0]
+            const counts = [events.length, socket.roomEvents.length, progress.mock.calls.length, activity.mock.calls.length]
+            socket.trigger('message', { ...payload, message: 'invalid JSON replay' })
+            expect([events.length, socket.roomEvents.length, progress.mock.calls.length, activity.mock.calls.length]).toEqual(counts)
+            expect(store.messages.getAllMessages(session.id)).toEqual([original])
+            // The same local id on another session remains a distinct message.
+            socket.trigger('message', { ...payload, sid: sibling.id })
+            expect(store.messages.countMessages(sibling.id)).toBe(1)
+            // No-id streams cannot safely be deduplicated.
+            socket.trigger('message', { sid: session.id, message: payload.message })
+            socket.trigger('message', { sid: session.id, message: payload.message })
+            expect(store.messages.countMessages(session.id)).toBe(3)
+        } finally { store.close() }
+    })
+
     it.each(['update-metadata', 'update-state'])('only compacts identical %s acknowledgements at the live version', event => {
         const store = new Store(':memory:')
         try {

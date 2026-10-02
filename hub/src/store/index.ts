@@ -146,8 +146,8 @@ export class Store {
                 this.sessions.touchSessionUpdatedAt(sessionId, invokedAt, namespace)
             }
 
-            const session = this.sessions.getSessionByNamespace(sessionId, namespace)
-            if (!session) {
+            const session = this.sessions.getSessionActivity(sessionId)
+            if (!session || session.namespace !== namespace) {
                 throw new Error('session not found after messages-consumed transition')
             }
             if (changes > 0 && session.updatedAt < invokedAt) {

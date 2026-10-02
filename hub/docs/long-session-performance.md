@@ -4,6 +4,50 @@ Date: 2026-10-01.
 Upstream baseline: `86c88df93baf5d1f738dd4b202078bdf6dec376e` (CLI version 0.30.7).
 Checkout: `/home/alex/Repos/VPS/hapi`.
 
+## Production follow-up, 2026-10-02
+
+The previous deployment did not resolve the live incident. Session-list requests
+took 16-49 seconds, RSS reached approximately 1.5 GiB on a 2 GiB host, swap was
+full, and origin authentication itself exceeded a 12-second timeout. Do not
+interpret the earlier synthetic results as evidence of production recovery.
+
+Two additional causes were established:
+
+- Scheduled indicators chose `idx_messages_local_id`, visiting approximately
+  151,000 consumed local history rows although only one pending row remained.
+  Explicitly selecting `idx_messages_uninvoked_local` preserves predicates and
+  cuts the observed read-only query from 543 ms to 0.14 ms. No schema change.
+- A bounded live Bun sampling profile identified transcript replay and consumed
+  acknowledgements as hot paths: `addMessage` accounted for 29.3% of samples,
+  decoding stored messages for 18.2%, and full session deserialization for 13.8%.
+  Existing local-id messages now stop after authorization and an indexed
+  existence check, before parsing, decompression, fan-out, or repeated deltas.
+  Consumption transactions read only namespace/activity fields. Namespace
+  validation, rollback, first consumption timestamps and acknowledgement
+  broadcasts remain intact. Messages without an id are not deduplicated.
+
+Regression coverage checks scheduled query plans, pending-state exclusions,
+cross-session ids, replay side effects and transactional acknowledgement behavior.
+Hub checks: 1,390 passed, three real-agent integration tests skipped; Hub and
+load-driver typechecks passed.
+
+The new `history-replay` stress mode sends an existing message and a consumption
+ack followed by a ping barrier. With two 200,000-message sessions, one client
+each, 1,000 pairs/second for 15 seconds, pinned to one CPU:
+
+| Metric | Scheduled-index fix only | Plus replay fix |
+| --- | --- | --- |
+| Hub CPU | 62.63% | 17.70% |
+| Ack P95 | 7.43 ms | 1.88 ms |
+| SSE handshake P95 | 7.44 ms | 3.89 ms |
+| Message API P95 | 12.14 ms | 3.82 ms |
+| Errors / backpressure | 0 / 0 | 0 / 0 |
+
+The fixture contains small plaintext payloads; real history has larger compressed
+messages. These remain synthetic comparisons, not a live send confirmation.
+An indeterminate production prompt is preserved, never silently retried or
+marked consumed. Live validation uses read-only probes and disposable sessions.
+
 ## Scope
 
 The deployed 0.29.0 Hub profile showed synchronous SQLite and JSON processing

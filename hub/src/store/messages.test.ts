@@ -178,6 +178,26 @@ describe('cancelQueuedMessage', () => {
 })
 
 describe('recordMessagesConsumed', () => {
+    it('uses only activity fields and keeps duplicate acknowledgement timestamps stable', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'consumed-narrow-read')
+        store.messages.addMessage(session.id, { text: 'queued' }, 'queued')
+        const at = Date.now() + 1000
+        const originalGetter = store.sessions.getSessionByNamespace
+        store.sessions.getSessionByNamespace = () => { throw new Error('full metadata read') }
+        try {
+            expect(store.recordMessagesConsumed(session.id, ['queued'], at, 'default')).toBe(at)
+            expect(store.recordMessagesConsumed(session.id, ['queued'], at + 1000, 'default')).toBe(at)
+            expect(store.messages.getLocalMessageStates(session.id, ['queued']))
+                .toEqual([{ localId: 'queued', invokedAt: at }])
+            expect(() => store.recordMessagesConsumed(session.id, ['queued'], at + 2000, 'other'))
+                .toThrow('session not found after messages-consumed transition')
+        } finally {
+            store.sessions.getSessionByNamespace = originalGetter
+            store.close()
+        }
+    })
+
     it('rolls back the invocation transition when the session namespace cannot be verified', () => {
         const store = makeStore()
         const session = makeSession(store, 'consumed-rollback-wrong-namespace')

@@ -124,6 +124,15 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
 
         const { sid, localId, createdAt } = parsed.data
+        const sessionAccess = resolveSessionAccess(sid)
+        if (!sessionAccess.ok) {
+            emitAccessError('session', sid, sessionAccess.reason)
+            return
+        }
+        const session = sessionAccess.value
+        // Reconnect transcript replays are first-write-wins. Avoid decoding
+        // and broadcasting the already-persisted row or repeating its deltas.
+        if (localId && store.messages.hasMessageWithLocalId(sid, localId)) return
         const raw = parsed.data.message
 
         const content = typeof raw === 'string'
@@ -135,13 +144,6 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                 }
             })()
             : raw
-
-        const sessionAccess = resolveSessionAccess(sid)
-        if (!sessionAccess.ok) {
-            emitAccessError('session', sid, sessionAccess.reason)
-            return
-        }
-        const session = sessionAccess.value
 
         if (isRedundantGoalStatusEventContent(content)) {
             return

@@ -2,6 +2,7 @@ import type { Database } from 'bun:sqlite'
 
 import { hasConversationMessageContent } from '@hapi/protocol/messages'
 import { decodeMessageContent } from './contentCodec'
+import { prepareCached } from './statementCache'
 
 import type { StoredMessage } from './types'
 import {
@@ -58,6 +59,12 @@ export class MessageStore {
 
     addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null, createdAt?: number): StoredMessage {
         return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt)
+    }
+
+    hasMessageWithLocalId(sessionId: string, localId: string): boolean {
+        return Boolean(prepareCached(this.db,
+            'SELECT 1 FROM messages WHERE session_id = ? AND local_id = ? LIMIT 1'
+        ).get(sessionId, localId))
     }
 
     syncNativeQueuedMessage(sessionId: string, localId: string, text: string): StoredMessage {

@@ -26,7 +26,7 @@ const options = {
     clients: integer(values.clients, 'clients'), rate: integer(values.rate, 'rate'),
     duration: integer(values.duration, 'duration'), mode: values.mode!, compact: values.compact === true
 }
-if (!['replay', 'mixed'].includes(options.mode)) throw new Error('Mode must be replay or mixed')
+if (!['replay', 'mixed', 'history-replay'].includes(options.mode)) throw new Error('Mode must be replay, mixed or history-replay')
 
 type SessionFixture = { id: string; metadata: Record<string, unknown>; metadataVersion: number; stateVersion: number }
 type Ready = { type: 'ready'; port: number; jwt: string; sessions: SessionFixture[] }
@@ -280,7 +280,14 @@ async function driver(): Promise<void> {
                 const timestamp = performance.now()
                 const expectedVersion = operation === 0 ? fixture.metadataVersion : fixture.stateVersion
                 let acknowledgement: Promise<Ack>
-                if (operation === 0 || operation === 1) {
+                if (options.mode === 'history-replay') {
+                    const fixtureIndex = ready.sessions.findIndex(session => session.id === fixture.id)
+                    const localId = `${fixtureIndex}-local-${sequence % options.messages + 1}`
+                    fixture.socket.emit('message', { sid: fixture.id, localId,
+                        message: { role: 'user', content: { type: 'text', text: 'Synthetic history' } } })
+                    fixture.socket.emit('messages-consumed', { sid: fixture.id, localIds: [localId] })
+                    acknowledgement = fixture.socket.timeout(5000).emitWithAck('ping').then(() => ({ result: 'success' }))
+                } else if (operation === 0 || operation === 1) {
                     const metadata = operation === 0
                     acknowledgement = fixture.socket.timeout(5000).emitWithAck(metadata ? 'update-metadata' : 'update-state', {
                         sid: fixture.id, expectedVersion,
