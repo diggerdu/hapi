@@ -655,6 +655,8 @@ export function countMessages(db: Database, sessionId: string): number {
 }
 
 /** Count uninvoked local messages scheduled for a future time (session list indicator). */
+// Pin the partial index: SQLite can otherwise prefer idx_messages_local_id
+// and visit every consumed history row for these scheduled-state predicates.
 export function countFutureScheduledLocalMessages(
     db: Database,
     sessionId: string,
@@ -662,7 +664,7 @@ export function countFutureScheduledLocalMessages(
 ): number {
     const row = prepareCached(db, `
         SELECT COUNT(*) AS count
-        FROM messages
+        FROM messages INDEXED BY idx_messages_uninvoked_local
         WHERE session_id = ?
           AND invoked_at IS NULL
           AND local_id IS NOT NULL
@@ -687,7 +689,7 @@ export function countFutureScheduledBySessionIds(
     const placeholders = sessionIds.map(() => '?').join(',')
     const rows = prepareCached(db, `
         SELECT session_id, COUNT(*) AS count
-        FROM messages
+        FROM messages INDEXED BY idx_messages_uninvoked_local
         WHERE session_id IN (${placeholders})
           AND invoked_at IS NULL
           AND local_id IS NOT NULL
@@ -717,7 +719,7 @@ export function minFutureScheduledAtBySessionIds(
     const placeholders = sessionIds.map(() => '?').join(',')
     const rows = prepareCached(db, `
         SELECT session_id, MIN(scheduled_at) AS next_at
-        FROM messages
+        FROM messages INDEXED BY idx_messages_uninvoked_local
         WHERE session_id IN (${placeholders})
           AND invoked_at IS NULL
           AND local_id IS NOT NULL
