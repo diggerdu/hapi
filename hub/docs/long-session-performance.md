@@ -48,6 +48,23 @@ messages. These remain synthetic comparisons, not a live send confirmation.
 An indeterminate production prompt is preserved, never silently retried or
 marked consumed. Live validation uses read-only probes and disposable sessions.
 
+Both October 2 fixes are deployed as application commit `f378d014`. Two live
+isolated-namespace delivery runs passed: 20 synthetic prompts, 40 POSTs including
+idempotent retries, exactly 20 stored rows and explicit CLI consumption of every
+prompt. Only the synthetic sessions were deleted afterward. Six real sessions
+remain, with no foreign-key errors; the one old indeterminate row is untouched.
+The diagnostic probe is `hub/scripts/probe-live-delivery.ts` and prints no tokens
+or user transcript. Supply a private token-file path; it creates no real-agent
+turns and its fake CLI acknowledges only its own isolated session.
+
+Latest repeated public probes: both real CLI sessions active, SSE handshakes
+38-72 ms and 200-message pages 118-197 ms. Hub sampled at 5-32% CPU and around
+116 MiB container memory, healthy with no automatic restarts. The profile
+preload is disabled. Redundant release artifacts/build cache were removed and
+backups compressed without deleting history, restoring around 1.2 GiB free disk.
+Long-duration memory behavior and browser rendering on the user's device remain
+outside these short-term checks; do not promise that every possible stall is gone.
+
 ## Scope
 
 The deployed 0.29.0 Hub profile showed synchronous SQLite and JSON processing
