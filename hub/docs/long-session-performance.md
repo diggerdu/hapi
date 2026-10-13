@@ -4,6 +4,49 @@ Date: 2026-10-01.
 Upstream baseline: `86c88df93baf5d1f738dd4b202078bdf6dec376e` (CLI version 0.30.7).
 Checkout: `/home/alex/Repos/VPS/hapi`.
 
+## Fork integration, 2026-10-13
+
+Branch: `integrate/long-session-upstream-20261013` in `diggerdu/hapi`.
+Merged upstream/fork main `5847b034e5cb84f2617766945c994b7905c5c03e`
+into local head `c5f9beb820bd2e0c44ceb6d2c116d575f5fbfcd0` without conflicts.
+All seven existing local commits remain in history; ten newer upstream commits
+are included. This is a source integration only, not a production deployment.
+The optimized Hub keeps schema v27 and its existing v26-to-v27 migration.
+
+Verification used Bun 1.3.12 and Node 24.15.0 on Linux. The repository declares
+Bun 1.4.0; that runtime version was not tested. Frozen-lockfile installation
+completed without lockfile changes.
+
+- All CLI, Hub, Web and Relay typechecks passed, including Hub load-driver types.
+- Full root test run passed: CLI 2,973 passed / 11 skipped; Hub 1,390 passed /
+  three skipped; Web 3,348 passed; shared 323 passed; Relay 118 passed.
+  Total: 8,152 passed, 14 skipped, zero failed. Skipped tests were not validated.
+- Root build passed, including Web assets, embedded assets and Hub bundle.
+  Existing manifest theme-color and large-chunk warnings remain.
+- Android/iOS native suites and production message delivery were not run.
+- Long-session store benchmark completed at 10,000, 100,000 and 500,000 rows.
+  Replayed metadata/state never advanced versions; the empty-queue query used
+  `idx_messages_immediate_queued` at every size.
+
+An isolated Socket.IO/SSE stress run used two 200,000-message sessions, one CLI
+client each, 1,000 history-replay pairs per second, and a 15-second window:
+
+```sh
+node hub/scripts/stress-long-session.ts --messages 200000 --sessions 2 \
+    --clients 1 --rate 1000 --duration 15 --mode history-replay
+```
+
+15,001 offered pairs were sent and acknowledged, with zero backpressure,
+version mismatches, socket errors or probe errors. Ack P95 was 2.10 ms, SSE
+handshake P95 3.50 ms, and message-page P95 5.42 ms. Hub CPU was 31.54% and
+peak RSS 186.30 MiB. Message counts stayed at 200,000 per session and metadata/
+state versions stayed at one. This run was not CPU-pinned and is not directly
+comparable to earlier single-CPU measurements or production latency.
+
+An earlier run concurrent with full tests/build acknowledged 9,999 pairs and
+backpressured 5,014 offered pairs, with zero errors. The isolated repeat above
+avoids that local workload contention; neither run establishes a production SLA.
+
 ## Production follow-up, 2026-10-02
 
 The previous deployment did not resolve the live incident. Session-list requests
