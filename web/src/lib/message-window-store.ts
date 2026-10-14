@@ -3,6 +3,7 @@ import type { ApiClient } from '@/api/client'
 import { normalizeDecryptedMessage } from '@/chat/normalize'
 import type { DecryptedMessage, MessageStatus, MessagesResponse } from '@/types/api'
 import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
+import { createMessageWindowCache, selectCachedMessages } from '@/lib/message-window-cache'
 
 export type MessageViewMode = 'tail' | 'history'
 
@@ -82,17 +83,54 @@ type TailSyncController = {
 const states = new Map<string, InternalState>()
 const listeners = new Map<string, Set<() => void>>()
 const tailSyncControllers = new Map<string, TailSyncController>()
+const olderLoads = new Map<string, { api: ApiClient; generation: number; promise: Promise<OlderLoadOutcome> }>()
+const pageRequests = new WeakMap<ApiClient, Map<string, Promise<MessagesResponse>>>()
 const appliedRewindLocalIds = new Map<string, Set<string>>()
 
 const NOTIFY_THROTTLE_MS = 150
 const PERSIST_THROTTLE_MS = 200
 const STORAGE_KEY_PREFIX = 'hapi:message-window:v2:'
+const lastPersistedInputs = new Map<string, InternalState>()
+const messageCache = createMessageWindowCache(() => {
+    try { return typeof sessionStorage === 'undefined' ? null : sessionStorage } catch { return null }
+}, STORAGE_KEY_PREFIX)
 const pendingNotifySessionIds = new Set<string>()
 const pendingPersistSessionIds = new Set<string>()
 let notifyRafId: ReturnType<typeof requestAnimationFrame> | null = null
 let notifyTimerId: ReturnType<typeof setTimeout> | null = null
 let persistTimerId: ReturnType<typeof setTimeout> | null = null
 let lastNotifyAt = 0
+
+function traceMessageRequest(sessionId: string, event: string, detail: Record<string, unknown> = {}): void {
+    if (typeof window === 'undefined' || !(window as Window & { __hapiDebugMessageRequests?: boolean }).__hapiDebugMessageRequests) return
+    window.dispatchEvent(new CustomEvent('hapi:message-request', {
+        detail: { sessionId, event, at: performance.now(), ...detail }
+    }))
+}
+
+function getMessagePage(api: ApiClient, sessionId: string, options: Parameters<ApiClient['getMessages']>[1]): Promise<MessagesResponse> {
+    let requests = pageRequests.get(api)
+    if (!requests) {
+        requests = new Map()
+        pageRequests.set(api, requests)
+    }
+    const state = getState(sessionId)
+    const key = JSON.stringify([sessionId, state.epoch, state.syncGeneration, options])
+    const existing = requests.get(key)
+    if (existing) {
+        traceMessageRequest(sessionId, 'shared', { query: options, generation: state.syncGeneration, epoch: state.epoch })
+        return existing
+    }
+    traceMessageRequest(sessionId, 'start', { query: options, generation: state.syncGeneration, epoch: state.epoch })
+    const request = api.getMessages(sessionId, options)
+    requests.set(key, request)
+    void request.then(response => {
+        traceMessageRequest(sessionId, 'received', { query: options, epoch: response.page.epoch, reset: response.page.reset })
+    }, () => traceMessageRequest(sessionId, 'failed', { query: options })).finally(() => {
+        if (requests.get(key) === request) requests.delete(key)
+    }).catch(() => {})
+    return request
+}
 
 function requestNotifyFrame(): void {
     if (notifyRafId !== null) {
@@ -173,25 +211,33 @@ function persistState(sessionId: string, state: InternalState): void {
     }
     try {
         if (!shouldPersistState(state)) {
-            sessionStorage.removeItem(getStorageKey(sessionId))
+            messageCache.delete(sessionId)
+            lastPersistedInputs.delete(sessionId)
             return
         }
+        if (samePersistedInput(lastPersistedInputs.get(sessionId), state)) return
+        lastPersistedInputs.set(sessionId, state)
+        const messages = selectCachedMessages(state.messages, (message) => optimisticMessage(message) || isQueuedForInvocation(message))
+        const truncated = messages.length < state.messages.length
+        const oldest = truncated ? derivePosition(messages.filter(message => !optimisticMessage(message) && !isQueuedForInvocation(message)), 'oldest') : null
         const persisted: PersistedMessageWindowState = {
-            messages: state.messages,
-            hasMore: state.hasMore,
-            oldestPositionAt: state.oldestPositionAt,
-            oldestPositionSeq: state.oldestPositionSeq,
+            messages,
+            hasMore: state.hasMore || truncated,
+            oldestPositionAt: truncated ? oldest?.at ?? null : state.oldestPositionAt,
+            oldestPositionSeq: truncated ? oldest?.seq ?? null : state.oldestPositionSeq,
             newestPositionAt: state.newestPositionAt,
             newestPositionSeq: state.newestPositionSeq,
             epoch: state.epoch
         }
-        sessionStorage.setItem(getStorageKey(sessionId), JSON.stringify(persisted))
+        messageCache.write(sessionId, persisted)
     } catch {
     }
 }
 
 function clearPersistedState(sessionId: string): void {
     pendingPersistSessionIds.delete(sessionId)
+    lastPersistedInputs.delete(sessionId)
+    messageCache.delete(sessionId)
     if (!isSessionStorageAvailable()) {
         return
     }
@@ -199,6 +245,18 @@ function clearPersistedState(sessionId: string): void {
         sessionStorage.removeItem(getStorageKey(sessionId))
     } catch {
     }
+}
+
+function samePersistedInput(previous: InternalState | undefined, next: InternalState): boolean {
+    return previous !== undefined
+        && (previous.messages === next.messages || (previous.messages.length === next.messages.length
+            && previous.messages.every((message, index) => message === next.messages[index])))
+        && previous.hasMore === next.hasMore
+        && previous.epoch === next.epoch
+        && previous.oldestPositionAt === next.oldestPositionAt
+        && previous.oldestPositionSeq === next.oldestPositionSeq
+        && previous.newestPositionAt === next.newestPositionAt
+        && previous.newestPositionSeq === next.newestPositionSeq
 }
 
 function flushPersistedStates(): void {
@@ -314,13 +372,14 @@ function notifyImmediate(sessionId: string): void {
 }
 
 function setState(sessionId: string, next: InternalState, immediate = false): void {
+    const previous = states.get(sessionId)
     states.set(sessionId, next)
     // A latest-reset state still contains the previous server snapshot. Do not
     // persist that stale window while the authoritative replacement is in
     // flight; a reload during the reset must not resurrect removed messages.
     if (next.requiresLatestReset) {
         pendingPersistSessionIds.delete(sessionId)
-    } else {
+    } else if (!samePersistedInput(previous, next)) {
         schedulePersist(sessionId)
     }
     if (immediate) {
@@ -655,14 +714,14 @@ function beginTailSync(sessionId: string): number {
     let generation = 0
     updateState(sessionId, (previous) => {
         generation = previous.syncGeneration + 1
+        const replaceWindow = previous.requiresLatestReset || previous.preferLatestOnActivation || previous.epoch === null
         return buildState(previous, {
             syncGeneration: generation,
-            // Tail reconciliation owns the authoritative epoch. An older-page
-            // response captured before this point must not commit while the tail
-            // request is in flight, or a reset can mistake it for concurrent SSE.
-            olderGeneration: previous.olderGeneration + 1,
+            // Incremental tail sync must not continually invalidate history.
+            // Older responses wait for this sync's epoch before applying.
+            olderGeneration: previous.olderGeneration + (replaceWindow ? 1 : 0),
             isSyncingTail: true,
-            isLoadingMore: false,
+            isLoadingMore: replaceWindow ? false : previous.isLoadingMore,
             warning: null
         })
     })
@@ -706,7 +765,7 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
                     : initialCursor === null
                         ? INITIAL_PAGE_SIZE
                         : PAGE_SIZE
-            const response = await api.getMessages(sessionId, { limit: latestPageSize })
+            const response = await getMessagePage(api, sessionId, { limit: latestPageSize })
             if (!isCurrentTailSync(sessionId, generation)) return
             updateState(sessionId, (previous) => {
                 if (previous.syncGeneration !== generation) return previous
@@ -726,7 +785,7 @@ async function runTailSync(api: ApiClient, sessionId: string): Promise<void> {
         let until: MessagePosition | null = null
         while (true) {
             const requestBaseline = new Map(getState(sessionId).messages.map((message) => [message.id, message]))
-            const response = await api.getMessages(sessionId, {
+            const response = await getMessagePage(api, sessionId, {
                 afterAt: after.at,
                 afterSeq: after.seq,
                 untilAt: until?.at ?? null,
@@ -938,7 +997,25 @@ export function syncTailMessages(
     return waitForTailSyncDrain(sessionId, controller, observed)
 }
 
-export async function fetchOlderMessages(
+export function fetchOlderMessages(
+    api: ApiClient,
+    sessionId: string,
+    options: { onBeforeApply?: (historyVersion: number) => boolean } = {}
+): Promise<OlderLoadOutcome> {
+    const running = olderLoads.get(sessionId)
+    if (running?.api === api && running.generation === getState(sessionId).olderGeneration) {
+        return running.promise
+    }
+    const promise = runOlderMessageLoad(api, sessionId, options)
+    const controller = { api, generation: getState(sessionId).olderGeneration, promise }
+    olderLoads.set(sessionId, controller)
+    void promise.finally(() => {
+        if (olderLoads.get(sessionId) === controller) olderLoads.delete(sessionId)
+    }).catch(() => {})
+    return promise
+}
+
+async function runOlderMessageLoad(
     api: ApiClient,
     sessionId: string,
     options: {
@@ -964,13 +1041,26 @@ export async function fetchOlderMessages(
     }))
 
     try {
-        const response = await api.getMessages(sessionId, {
+        const response = await getMessagePage(api, sessionId, {
             beforeAt: before.at,
             beforeSeq: before.seq,
             limit: PAGE_SIZE
         })
+        const tailSync = tailSyncControllers.get(sessionId)
+        if (tailSync?.running) await waitForTailSyncDrain(sessionId, tailSync, tailSync.running)
         if (getState(sessionId).olderGeneration !== generation) {
+            traceMessageRequest(sessionId, 'rejected', { reason: 'generation', generation })
             return { kind: 'stopped', reason: 'invalidated' }
+        }
+
+        const nextBefore = readPosition(response.page.nextBeforeAt, response.page.nextBeforeSeq)
+        if (response.page.hasMore && (!nextBefore || comparePosition(nextBefore, before) >= 0)) {
+            updateState(sessionId, (previous) => buildState(previous, {
+                isLoadingMore: false,
+                hasMore: false,
+                warning: 'Message history cursor did not advance'
+            }))
+            return { kind: 'stopped', reason: 'unavailable' }
         }
 
         if (initial.epoch !== null && response.page.epoch !== initial.epoch) {
@@ -1022,8 +1112,11 @@ export async function fetchOlderMessages(
             })
         }, true)
         if (applyRejected || historyVersion === 0) {
+            traceMessageRequest(sessionId, 'rejected', { reason: 'viewport', generation })
             return { kind: 'stopped', reason: 'invalidated' }
         }
+        traceMessageRequest(sessionId, 'applied', { direction: 'before', generation, historyVersion,
+            beforeSeq: before.seq, nextBeforeSeq: response.page.nextBeforeSeq })
         return {
             kind: 'applied',
             historyVersion,
@@ -1115,6 +1208,7 @@ export function subscribeMessageWindow(sessionId: string, listener: () => void):
 
 export function clearMessageWindow(sessionId: string): void {
     tailSyncControllers.delete(sessionId)
+    olderLoads.delete(sessionId)
     clearPersistedState(sessionId)
     const previous = states.get(sessionId)
     if (!previous) return

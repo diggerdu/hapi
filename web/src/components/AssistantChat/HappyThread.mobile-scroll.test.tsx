@@ -13,8 +13,9 @@ vi.mock('@assistant-ui/react', async (importOriginal) => {
     return {
         ...actual,
         useAuiState: (selector: (state: unknown) => unknown) => selector({
-            thread: { extras: undefined }
+            thread: { extras: undefined, messages: [] }
         }),
+        useAui: () => ({ thread: () => ({ getState: () => ({ messages: [] }) }) }),
         unstable_useThreadMessageIds: () => [],
         ThreadPrimitive: {
             ...actual.ThreadPrimitive,
@@ -22,6 +23,7 @@ vi.mock('@assistant-ui/react', async (importOriginal) => {
                 <div className={className}>{children}</div>
             ),
             Viewport: ({ children }: PropsWithChildren) => children,
+            ViewportProvider: ({ children }: PropsWithChildren) => children,
             Messages: () => null
         }
     }
@@ -42,6 +44,8 @@ class TestResizeObserver {
     }
 
     observe() {}
+
+    unobserve() {}
 
     disconnect() {}
 }

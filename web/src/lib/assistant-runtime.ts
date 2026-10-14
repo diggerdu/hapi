@@ -520,7 +520,7 @@ function toThreadMessageLike(
             role: 'assistant',
             id: threadMessageId,
             createdAt: new Date(timestamp),
-            content: [{ type: 'text', text: block.text }],
+            content: [{ type: 'text', text: block.text, providerMetadata: { hapi: { blockId: block.id } } }],
             metadata: {
                 custom: {
                     kind: 'assistant',
@@ -560,7 +560,7 @@ function toThreadMessageLike(
             role: 'assistant',
             id: threadMessageId,
             createdAt: new Date(timestamp),
-            content: [{ type: 'reasoning', text: block.text }],
+            content: [{ type: 'reasoning', text: block.text, providerMetadata: { hapi: { blockId: block.id } } }],
             metadata: {
                 custom: {
                     kind: 'assistant',

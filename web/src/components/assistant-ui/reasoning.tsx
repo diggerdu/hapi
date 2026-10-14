@@ -7,7 +7,7 @@ import {
 import { MarkdownTextPrimitive } from '@assistant-ui/react-markdown'
 import { cn } from '@/lib/utils'
 import { useReasoningCollapse } from '@/hooks/useReasoningCollapse'
-import { useOptionalHappyChatContext } from '@/components/AssistantChat/context'
+import { useChatCardState, useOptionalHappyChatContext } from '@/components/AssistantChat/context'
 import {
     MARKDOWN_CLASSNAME,
     MARKDOWN_COMPONENTS_BY_LANGUAGE,
@@ -85,15 +85,17 @@ export const Reasoning: ReasoningMessagePartComponent = ({ text, status }) => {
 }
 
 type HappyReasoningGroupProps = PropsWithChildren<
-    Partial<Pick<ReasoningGroupProps, 'startIndex' | 'endIndex'>>
+    Partial<Pick<ReasoningGroupProps, 'startIndex' | 'endIndex'>> & { stateKey?: string }
 >
 
 export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
     children,
     startIndex = 0,
     endIndex,
+    stateKey,
 }) => {
-    const [isOpen, setIsOpen] = useState(false)
+    const messageId = useAuiState(state => state.message.id)
+    const [isOpen, setIsOpen] = useChatCardState(`reasoning:${stateKey ?? `${messageId}:${startIndex}`}`, false)
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const followLatestRef = useRef(true)
     const pointerActiveRef = useRef(false)
@@ -207,6 +209,7 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
             <button
                 type="button"
                 onClick={handleToggle}
+                aria-expanded={isOpen}
                 className={cn(
                     'flex w-full items-center gap-1.5 px-3.5 py-2.5 text-left text-xs font-medium',
                     'text-[var(--app-hint)] hover:text-[var(--app-fg)]',

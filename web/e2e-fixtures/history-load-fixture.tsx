@@ -1,4 +1,4 @@
-import { useMemo, useRef } from 'react'
+import { useMemo, useRef, useState } from 'react'
 import ReactDOM from 'react-dom/client'
 import { AssistantRuntimeProvider } from '@assistant-ui/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
@@ -15,7 +15,8 @@ import { isQueuedForInvocation } from '../src/lib/messages'
 import { useHappyRuntime } from '../src/lib/assistant-runtime'
 import { HappyThread } from '../src/components/AssistantChat/HappyThread'
 import type { ChatBlock } from '../src/chat/types'
-import { getMessageWindowState } from '../src/lib/message-window-store'
+import { appendOptimisticMessage, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed } from '../src/lib/message-window-store'
+import { buildConversationOutline } from '../src/chat/outline'
 
 // Drives the real message-window store + chat pipeline + HappyThread against a
 // fake paginated message API, so e2e tests can exercise older-history loading
@@ -33,6 +34,10 @@ type Probe = {
     releaseLatest: () => void
     holdBefore: () => void
     releaseBefore: () => void
+    append: () => void
+    queue: () => void
+    consume: () => void
+    appendPart: () => void
     windowState: () => {
         messageCount: number
         oldestSeq: number | null
@@ -66,6 +71,19 @@ window.__probe = {
         beforeResponseGate = null
         releaseBeforeResponse()
     },
+    append: () => {
+        const seq = allMessages.length + 1
+        const message = { id: `m-${seq}`, seq, localId: null, createdAt: BASE_AT + seq,
+            invokedAt: BASE_AT + seq, content: { role: 'user', content: { type: 'text', text: `Live message ${seq}` } } } as DecryptedMessage
+        allMessages.push(message)
+        ingestIncomingMessages(SESSION_ID, [message])
+    },
+    queue: () => appendOptimisticMessage(SESSION_ID, {
+        id: 'queued-live', localId: 'queued-live', seq: null, createdAt: BASE_AT + allMessages.length + 1,
+        invokedAt: null, status: 'queued', content: { role: 'user', content: { type: 'text', text: 'Queued live message' } }
+    } as DecryptedMessage),
+    consume: () => markMessagesConsumed(SESSION_ID, ['queued-live'], BASE_AT + allMessages.length + 2),
+    appendPart: () => {},
     windowState: () => {
         const state = getMessageWindowState(SESSION_ID)
         return {
@@ -270,6 +288,9 @@ const noopSend = () => {}
 const noopAbort = async () => {}
 
 function FixtureThread() {
+    const [outlineOpen, setOutlineOpen] = useState(false)
+    const [extraParts, setExtraParts] = useState(0)
+    window.__probe.appendPart = () => setExtraParts(value => value + 1)
     const {
         messages,
         warning,
@@ -305,9 +326,27 @@ function FixtureThread() {
         [reduced.blocks]
     )
     blocksByIdRef.current = reconciled.byId
+    const fixtureBlocks = useMemo<ChatBlock[]>(() => {
+        if (!fixtureParams.has('longTurn')) return reconciled.blocks
+        return [
+            { kind: 'user-text', id: 'long-turn-prompt', localId: null, createdAt: BASE_AT, text: 'Inspect the complete long turn' },
+            ...Array.from({ length: 240 + extraParts }, (_, index): ChatBlock => {
+                const id = `long-part-${index}`
+                if (index % 3 === 1) return {
+                    kind: 'tool-call', id, localId: null, createdAt: BASE_AT + index,
+                    tool: { id, name: 'Read', state: 'completed', input: { file_path: `/fixture/file-${index}.ts` },
+                        result: `Fixture output ${index}`, description: null, createdAt: BASE_AT + index,
+                        startedAt: BASE_AT + index, completedAt: BASE_AT + index + 1, execStartedAt: null, execCompletedAt: null },
+                    children: [],
+                }
+                return { kind: index % 3 === 2 ? 'agent-reasoning' : 'agent-text', id, localId: null,
+                    createdAt: BASE_AT + index, text: `Part ${index}: ${'A representative streamed message. '.repeat(5)}` }
+            }),
+        ]
+    }, [reconciled.blocks, extraParts])
     const visibleBlocks = useMemo(
-        () => buildVisibleChatBlocks(reconciled.blocks, { hasMoreMessages: hasMore }),
-        [reconciled.blocks, hasMore]
+        () => buildVisibleChatBlocks(fixtureBlocks, { hasMoreMessages: fixtureParams.has('longTurn') ? false : hasMore }),
+        [fixtureBlocks, hasMore]
     )
 
     const runtime = useHappyRuntime({
@@ -323,6 +362,7 @@ function FixtureThread() {
     return (
         <AssistantRuntimeProvider runtime={runtime}>
             <div className="flex h-screen min-h-0 flex-col">
+                {fixtureParams.has('virtualTest') ? <button onClick={() => setOutlineOpen(true)}>Conversation outline</button> : null}
                 <HappyThread
                     api={fakeApi}
                     session={fakeSession}
@@ -333,7 +373,7 @@ function FixtureThread() {
                     onViewModeChange={setViewMode}
                     isSyncingTail={isSyncingTail}
                     messagesWarning={warning}
-                    hasMoreMessages={hasMore}
+                    hasMoreMessages={fixtureParams.has('longTurn') ? false : hasMore}
                     isLoadingMoreMessages={isLoadingMore}
                     onLoadMore={loadMore}
                     onCancelLoadMore={cancelLoadMore}
@@ -345,9 +385,9 @@ function FixtureThread() {
                     messagesVersion={messagesVersion}
                     historyVersion={historyVersion}
                     forceScrollToken={0}
-                    outlineOpen={false}
-                    outlineItems={[]}
-                    onOutlineOpenChange={() => {}}
+                    outlineOpen={outlineOpen}
+                    outlineItems={buildConversationOutline(fixtureBlocks)}
+                    onOutlineOpenChange={setOutlineOpen}
                 />
             </div>
         </AssistantRuntimeProvider>

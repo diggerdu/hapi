@@ -251,6 +251,33 @@ afterEach(() => {
 })
 
 describe('message tail synchronization', () => {
+    it('does not serialize unchanged windows when only loading or view state changes', async () => {
+            const id = sessionId('cache-state-only')
+            const latest = makeAgentMessage({ id: 'latest', seq: 10, at: 10_000 })
+            const api = createApi(vi.fn().mockResolvedValue(latestResponse([latest], { epoch: 1 })))
+            await syncTailMessages(api, id)
+            await vi.waitFor(() => expect(sessionStorage.getItem(`hapi:message-window:v2:${id}`)).not.toBeNull())
+            const stringify = vi.spyOn(JSON, 'stringify')
+            setMessageViewMode(id, 'history')
+            setMessageViewMode(id, 'tail')
+            await new Promise(resolve => setTimeout(resolve, 250))
+            expect(stringify.mock.calls.filter(([value]) => value && typeof value === 'object' && 'oldestPositionAt' in value)).toHaveLength(0)
+    })
+
+    it('persists a bounded suffix with a correct older cursor despite an old queued row', async () => {
+            const id = sessionId('cache-bounded-cursor')
+            const messages = Array.from({ length: 300 }, (_, index) => makeAgentMessage({ id: `m-${index + 1}`, seq: index + 1, at: (index + 1) * 1_000 }))
+            const api = createApi(vi.fn().mockResolvedValue(latestResponse(messages, { epoch: 1 })))
+            await syncTailMessages(api, id)
+            appendOptimisticMessage(id, makeUserMessage({ id: 'queued', localId: 'queued', seq: 0, createdAt: 0, invokedAt: null, status: 'queued' }))
+            await vi.waitFor(() => expect(sessionStorage.getItem(`hapi:message-window:v2:${id}`)).not.toBeNull())
+            const cached = JSON.parse(sessionStorage.getItem(`hapi:message-window:v2:${id}`)!)
+            expect(cached.messages).toHaveLength(201)
+            expect(cached.messages[0].id).toBe('queued')
+            expect(cached.oldestPositionSeq).toBe(101)
+            expect(cached.hasMore).toBe(true)
+            expect(getMessageWindowState(id).messages).toHaveLength(301)
+    })
     it('uses a small cold latest page while keeping older loads at full page size', async () => {
         const id = sessionId('cold-initial-page')
         const latestMessages = Array.from({ length: INITIAL_PAGE_SIZE }, (_, index) =>
@@ -1098,6 +1125,40 @@ describe('message tail synchronization', () => {
 })
 
 describe('history view and older pagination', () => {
+    it('shares an in-flight older load between consumers and preserves it through ordinary tail sync', async () => {
+        const id = sessionId('older-shared-with-tail')
+        const older = deferred<MessagesResponse>()
+        const latest = makeAgentMessage({ id: 'latest', seq: 10, at: 10_000 })
+        const getMessages = vi.fn()
+            .mockResolvedValueOnce(latestResponse([latest], { epoch: 1, hasMore: true, nextBeforeAt: 10_000, nextBeforeSeq: 10 }))
+            .mockImplementationOnce(() => older.promise)
+            .mockResolvedValueOnce(afterResponse([], { epoch: 1, nextAfterAt: 10_000, nextAfterSeq: 10, snapshotHeadAt: 10_000, snapshotHeadSeq: 10 }))
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        setMessageViewMode(id, 'history')
+        const first = fetchOlderMessages(api, id)
+        const second = fetchOlderMessages(api, id)
+        expect(first).toBe(second)
+        await syncTailMessages(api, id)
+        expect(getMessageWindowState(id).isLoadingMore).toBe(true)
+        older.resolve(beforeResponse([makeAgentMessage({ id: 'older', seq: 9, at: 9_000 })], { epoch: 1, hasMore: false, nextBeforeAt: 9_000, nextBeforeSeq: 9 }))
+        expect(await first).toMatchObject({ kind: 'applied' })
+        expect(getMessageWindowState(id).messages.map(message => message.id)).toEqual(['older', 'latest'])
+        expect(getMessages).toHaveBeenCalledTimes(3)
+    })
+
+    it('stops a non-advancing older cursor instead of repeatedly fetching the same page', async () => {
+        const id = sessionId('older-cursor-stuck')
+        const getMessages = vi.fn()
+            .mockResolvedValueOnce(latestResponse([makeAgentMessage({ id: 'latest', seq: 10, at: 10_000 })], { epoch: 1, hasMore: true, nextBeforeAt: 10_000, nextBeforeSeq: 10 }))
+            .mockResolvedValueOnce(beforeResponse([], { epoch: 1, hasMore: true, nextBeforeAt: 10_000, nextBeforeSeq: 10 }))
+        const api = createApi(getMessages)
+        await syncTailMessages(api, id)
+        expect(await fetchOlderMessages(api, id)).toEqual({ kind: 'stopped', reason: 'unavailable' })
+        expect(await fetchOlderMessages(api, id)).toEqual({ kind: 'stopped', reason: 'exhausted' })
+        expect(getMessages).toHaveBeenCalledTimes(2)
+        expect(getMessageWindowState(id).warning).toContain('did not advance')
+    })
     it('appends while reading history, then compacts at the tail', () => {
         const id = sessionId('history-unseen')
         const initial = Array.from({ length: VISIBLE_WINDOW_SIZE }, (_, index) =>
@@ -1438,13 +1499,18 @@ describe('history view and older pagination', () => {
             nextBeforeAt: 9_000,
             nextBeforeSeq: 9
         }))
-        expect(await loadingOlder).toEqual({ kind: 'stopped', reason: 'invalidated' })
+        let settled = false
+        void loadingOlder.then(() => { settled = true })
+        await Promise.resolve()
+        expect(settled).toBe(false)
         expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['initial'])
 
         reset.resolve(latestResponse([
             makeAgentMessage({ id: 'fresh', seq: 20, at: 20_000 })
         ], { epoch: 2, reset: true }))
         await syncing
+
+        expect(await loadingOlder).toEqual({ kind: 'stopped', reason: 'invalidated' })
 
         expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['fresh'])
         expect(getMessageWindowState(id).epoch).toBe(2)

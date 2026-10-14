@@ -3,7 +3,7 @@ import type { ToolGroupBlock } from '@/chat/toolGroups'
 import type { ToolCallBlock } from '@/chat/types'
 import { getCodexCommandActions, type CodexCommandAction } from '@/chat/codexCommandPresentation'
 import type { SessionMetadataSummary } from '@/types/api'
-import { useHappyChatContext } from '@/components/AssistantChat/context'
+import { useChatCardState, useHappyChatContext } from '@/components/AssistantChat/context'
 import { getToolTimingDetails, ToolDetailDialogContent, ToolStatusIcon, ToolTimingSummary, toolStatusColorClass } from '@/components/ToolCard/ToolCard'
 import { getToolPresentation } from '@/components/ToolCard/knownTools'
 import { formatGroupedHeaderSubtitle, formatGroupedHeaderTitle, safeGroupedLabelValue } from '@/components/ToolCard/groupedPresentation'
@@ -192,12 +192,13 @@ export function ToolGroupCard(props: {
 }) {
     const { t } = useTranslation()
     const ctx = useHappyChatContext()
-    const [open, setOpen] = useState(props.block.defaultOpen)
+    const [open, setOpen] = useChatCardState(`tool-group:${props.block.id}:open`, props.block.defaultOpen)
     const [selectedToolId, setSelectedToolId] = useState<string | null>(null)
     const [isHydratingHistory, setIsHydratingHistory] = useState(false)
     const [historyExhausted, setHistoryExhausted] = useState(false)
     const [now, setNow] = useState(() => Date.now())
     const hydrationRunRef = useRef(0)
+    const previousDefaults = useRef({ id: props.block.id, open: props.block.defaultOpen })
     const groupTiming = getToolGroupTiming(props.block.tools, now)
 
     useEffect(() => {
@@ -209,11 +210,14 @@ export function ToolGroupCard(props: {
 
     useEffect(() => {
         hydrationRunRef.current += 1
-        setOpen(props.block.defaultOpen)
+        if (previousDefaults.current.id !== props.block.id || previousDefaults.current.open !== props.block.defaultOpen) {
+            setOpen(props.block.defaultOpen)
+            previousDefaults.current = { id: props.block.id, open: props.block.defaultOpen }
+        }
         setSelectedToolId(null)
         setIsHydratingHistory(false)
         setHistoryExhausted(false)
-    }, [props.block.id, props.block.defaultOpen])
+    }, [props.block.id, props.block.defaultOpen, setOpen])
 
     useEffect(() => {
         if (!open) {

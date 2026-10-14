@@ -23,6 +23,12 @@ import {
 import { AssistantRuntimeProvider, useExternalStoreRuntime } from '@assistant-ui/react'
 import type { ThreadMessageLike } from '@assistant-ui/react'
 import type { ConversationOutlineItem } from '@/chat/outline'
+import {
+    estimateVirtualThreadMessageSize,
+    shouldVirtualizeThreadMessages,
+    VIRTUAL_THREAD_MESSAGE_THRESHOLD,
+    VIRTUAL_THREAD_PART_THRESHOLD,
+} from '@/components/AssistantChat/VirtualThreadMessages'
 
 const outlineItems: ConversationOutlineItem[] = [
     {
@@ -119,6 +125,36 @@ describe('ThreadMessagesById', () => {
             expect(screen.queryByTestId('user-message')).not.toBeInTheDocument()
             expect(screen.queryByTestId('assistant-message')).not.toBeInTheDocument()
         })
+    })
+})
+
+describe('virtualized outline targets', () => {
+    it('reveals an already loaded offscreen target without fetching older history', async () => {
+        const element = document.createElement('div')
+        const loadOlderPreservingScroll = vi.fn()
+        const revealTarget = vi.fn(async () => element)
+        const target = await locateOutlineTargetMessage({
+            targetMessageId: 'offscreen', findTarget: () => null,
+            hasMoreMessages: () => true, loadOlderPreservingScroll, revealTarget
+        })
+        expect(target).toBe(element)
+        expect(revealTarget).toHaveBeenCalledTimes(1)
+        expect(loadOlderPreservingScroll).not.toHaveBeenCalled()
+    })
+})
+
+describe('virtual thread sizing', () => {
+    it('enables virtualization for either many turns or a large turn payload', () => {
+        expect(shouldVirtualizeThreadMessages(VIRTUAL_THREAD_MESSAGE_THRESHOLD, VIRTUAL_THREAD_PART_THRESHOLD)).toBe(false)
+        expect(shouldVirtualizeThreadMessages(VIRTUAL_THREAD_MESSAGE_THRESHOLD + 1, 0)).toBe(true)
+        expect(shouldVirtualizeThreadMessages(1, VIRTUAL_THREAD_PART_THRESHOLD + 1)).toBe(true)
+    })
+
+    it('keeps small messages cheap and caps pathological estimates', () => {
+        expect(estimateVirtualThreadMessageSize(0)).toBe(96)
+        expect(estimateVirtualThreadMessageSize(1)).toBe(96)
+        expect(estimateVirtualThreadMessageSize(4)).toBe(480)
+        expect(estimateVirtualThreadMessageSize(100)).toBe(1200)
     })
 })
 

@@ -36,6 +36,7 @@ import { useMinuteTick } from '@/hooks/useMinuteTick'
 import { useTransientScrollbar } from '@/hooks/useTransientScrollbar'
 import { queryKeys } from '@/lib/query-keys'
 import { matchesSearchQuery } from '@hapi/protocol'
+import { VirtualThreadMessages, type VirtualThreadHandle } from '@/components/AssistantChat/VirtualThreadMessages'
 
 type ScrollAnchor = {
     id: string
@@ -84,7 +85,7 @@ export function isNestedScrollEvent(event: Event): boolean {
 }
 
 function findNearestMessageElement(content: HTMLElement, clientY?: number): HTMLElement | null {
-    const messages = Array.from(content.querySelectorAll('.happy-thread-messages > [id]'))
+    const messages = Array.from(content.querySelectorAll(MESSAGE_ANCHOR_SELECTOR))
         .filter((element): element is HTMLElement => element instanceof HTMLElement)
     if (messages.length === 0) return null
     if (typeof clientY !== 'number' || !Number.isFinite(clientY)) {
@@ -121,7 +122,7 @@ export function prependMissingUserSnapshot(
     return [fallbackSnapshot, ...snapshots]
 }
 
-const MESSAGE_ANCHOR_SELECTOR = '.happy-thread-messages > [id]'
+const MESSAGE_ANCHOR_SELECTOR = '.happy-thread-messages > [id], .happy-thread-messages > [data-hapi-virtual-row] > [id]'
 // Resume tail-following only once the user has actually reached the bottom.
 // A wider proximity threshold makes a downward-reading user enter tail mode
 // early; the next content/layout update then snaps the viewport to the end.
@@ -166,6 +167,7 @@ type LocateOutlineTargetOptions = {
     findTarget: (anchorId: string) => HTMLElement | null
     hasMoreMessages: () => boolean
     loadOlderPreservingScroll: () => Promise<boolean>
+    revealTarget?: () => Promise<HTMLElement | null>
 }
 
 export function getScrollIntent(params: {
@@ -253,13 +255,13 @@ export function hasAppliedHistoryVersion(
 
 export async function locateOutlineTargetMessage(options: LocateOutlineTargetOptions): Promise<HTMLElement | null> {
     const anchorId = getConversationMessageAnchorId(options.targetMessageId)
-    let target = options.findTarget(anchorId)
+    let target = options.findTarget(anchorId) ?? await options.revealTarget?.() ?? null
     while (!target && options.hasMoreMessages()) {
         const loaded = await options.loadOlderPreservingScroll()
         if (!loaded) {
             break
         }
-        target = options.findTarget(anchorId)
+        target = options.findTarget(anchorId) ?? await options.revealTarget?.() ?? null
     }
     return target
 }
@@ -619,6 +621,12 @@ export function HappyThread(props: {
     const appliedMessagesVersion = runtimeExtras?.messagesVersion ?? props.messagesVersion
     const appliedHistoryVersion = runtimeExtras?.historyVersion ?? props.historyVersion
     const viewportRef = useRef<HTMLDivElement | null>(null)
+    const [viewportElement, setViewportElement] = useState<HTMLDivElement | null>(null)
+    const attachViewport = useCallback((element: HTMLDivElement | null) => {
+        viewportRef.current = element
+        if (element) setViewportElement(element)
+    }, [])
+    const virtualThreadRef = useRef<VirtualThreadHandle>(null)
     useTransientScrollbar(viewportRef, 'right')
     const contentRef = useRef<HTMLDivElement | null>(null)
     const [pullToLoadState, setPullToLoadState] = useState<PullToLoadState>('idle')
@@ -627,6 +635,7 @@ export function HappyThread(props: {
     const shareTurnIdRef = useRef(0)
     const topSentinelRef = useRef<HTMLDivElement | null>(null)
     const pendingScrollRef = useRef<PendingScrollRestore | null>(null)
+    const getPinnedAnchorId = useCallback(() => pendingScrollRef.current?.anchor?.id ?? null, [])
     const isLoadingMoreRef = useRef(props.isLoadingMoreMessages)
     const hasMoreMessagesRef = useRef(props.hasMoreMessages)
     const isSyncingTailRef = useRef(props.isSyncingTail)
@@ -1520,11 +1529,14 @@ export function HappyThread(props: {
     }, [loadOlderFromConsumer])
 
     const handleOutlineSelect = useCallback(async (item: ConversationOutlineItem) => {
+        autoScrollEnabledRef.current = false
+        atBottomRef.current = false
         const target = await locateOutlineTargetMessage({
             targetMessageId: item.targetMessageId,
             findTarget: (anchorId) => document.getElementById(anchorId),
             hasMoreMessages: () => hasMoreMessagesRef.current,
-            loadOlderPreservingScroll: loadOlderForOutline
+            loadOlderPreservingScroll: loadOlderForOutline,
+            revealTarget: async () => await virtualThreadRef.current?.reveal(item.targetMessageId) ?? null
         })
         if (target) {
             target.scrollIntoView({ block: 'start', behavior: 'smooth' })
@@ -1655,7 +1667,7 @@ export function HappyThread(props: {
     ])
 
     const showSkeleton = props.isSyncingTail && props.rawMessagesCount === 0
-    const handleShareTurn = useCallback((
+    const handleShareTurn = useCallback(async (
         messageTarget: HTMLElement | string | null,
         clientY?: number,
         fallbackSnapshot?: ShareTurnSnapshot
@@ -1681,46 +1693,45 @@ export function HappyThread(props: {
             return
         }
 
-        let start: Element | null = target
-        while (start?.previousElementSibling && start.getAttribute('data-hapi-message-role') !== 'user') {
-            start = start.previousElementSibling
-        }
-        if (!start || start.getAttribute('data-hapi-message-role') !== 'user') {
-            start = target
-        }
+        const targetAnchorId = target.id
+        const capture = () => {
+            target = document.getElementById(targetAnchorId)
+            if (!target || !content.contains(target)) return
+            const renderedMessages = Array.from(content.querySelectorAll<HTMLElement>(MESSAGE_ANCHOR_SELECTOR))
+            let startIndex = renderedMessages.indexOf(target)
+            while (startIndex > 0 && renderedMessages[startIndex]?.getAttribute('data-hapi-message-role') !== 'user') startIndex--
+            const start = renderedMessages[startIndex]
 
-        const snapshots: ShareTurnSnapshot[] = []
-        let current: Element | null = start
-        while (current instanceof HTMLElement) {
-            if (current !== start && current.getAttribute('data-hapi-message-role') === 'user') {
-                break
+            const snapshots: ShareTurnSnapshot[] = []
+            for (const current of renderedMessages.slice(startIndex)) {
+                if (current !== start && current.getAttribute('data-hapi-message-role') === 'user') {
+                    break
+                }
+                const role = current.getAttribute('data-hapi-message-role')
+                if (role === 'user' || role === 'assistant') {
+                    snapshots.push({
+                        html: current.outerHTML,
+                        text: (current.innerText || current.textContent || '').trim()
+                    })
+                }
             }
-            const role = current.getAttribute('data-hapi-message-role')
-            if (role === 'user' || role === 'assistant') {
+
+            if (snapshots.length === 0) {
                 snapshots.push({
-                    html: current.outerHTML,
-                    text: (current.innerText || current.textContent || '').trim()
+                    html: target.outerHTML,
+                    text: (target.innerText || target.textContent || '').trim()
                 })
             }
-            current = current.nextElementSibling
-        }
+            const completeSnapshots = prependMissingUserSnapshot(snapshots, fallbackSnapshot)
 
-        if (snapshots.length === 0 && target instanceof HTMLElement) {
-            snapshots.push({
-                html: target.outerHTML,
-                text: (target.innerText || target.textContent || '').trim()
+            setShareTurn({
+                id: ++shareTurnIdRef.current,
+                snapshots: completeSnapshots,
+                sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
             })
         }
-        if (snapshots.length === 0 && fallbackSnapshot) {
-            snapshots.push(fallbackSnapshot)
-        }
-        const completeSnapshots = prependMissingUserSnapshot(snapshots, fallbackSnapshot)
-
-        setShareTurn({
-            id: ++shareTurnIdRef.current,
-            snapshots: completeSnapshots,
-            sourceContentWidth: sourceContentWidth > 0 ? sourceContentWidth : null,
-        })
+        if (virtualThreadRef.current) await virtualThreadRef.current.withTurn(targetAnchorId, capture)
+        else capture()
     }, [props.session])
 
     return (
@@ -1768,19 +1779,16 @@ export function HappyThread(props: {
                         </span>
                     </div>
                 ) : null}
-                <ThreadPrimitive.Viewport
-                    asChild
-                    autoScroll={false}
-                    scrollToBottomOnInitialize={false}
-                    scrollToBottomOnRunStart={false}
-                    scrollToBottomOnThreadSwitch={false}
-                >
+                {/* HappyThread owns scrolling; the primitive viewport would
+                    install a second subtree observer and layout-reading loop. */}
+                <ThreadPrimitive.ViewportProvider>
                     <div
-                        ref={viewportRef}
+                        ref={attachViewport}
                         className="app-scroll-y chat-scroll-y scrollbar-auto-hide min-h-0 flex-1 overflow-x-hidden focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--app-link)]"
                         tabIndex={0}
                     >
-                        <div ref={contentRef} className="chat-scroll-content mx-auto w-full max-w-content min-w-0 p-3">
+                        <div ref={contentRef} className="chat-scroll-content mx-auto w-full max-w-content min-w-0 p-3"
+                            data-raw-messages-count={props.rawMessagesCount} data-normalized-messages-count={props.normalizedMessagesCount}>
                             <div ref={topSentinelRef} className="h-px w-full" aria-hidden="true" />
                             {showSkeleton ? (
                                 <MessageSkeleton />
@@ -1799,12 +1807,11 @@ export function HappyThread(props: {
                                     ) : null}
                                 </>
                             )}
-                            <div className="happy-thread-messages flex flex-col gap-3">
-                                <ThreadMessagesById components={THREAD_MESSAGE_COMPONENTS} />
-                            </div>
+                            <VirtualThreadMessages ref={virtualThreadRef} key={props.sessionId}
+                                components={THREAD_MESSAGE_COMPONENTS} scrollElement={viewportElement} getPinnedAnchorId={getPinnedAnchorId} />
                         </div>
                     </div>
-                </ThreadPrimitive.Viewport>
+                </ThreadPrimitive.ViewportProvider>
                 <NewMessagesIndicator count={props.unseenCount} onClick={scrollToBottom} />
                 {shouldRenderScrollToBottomButton(showScrollToBottom, props.unseenCount) ? (
                     <ScrollToBottomButton onClick={scrollToBottom} />

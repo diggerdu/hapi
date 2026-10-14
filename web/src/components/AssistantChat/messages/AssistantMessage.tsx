@@ -10,6 +10,7 @@ import { MessageActions } from '@/components/AssistantChat/messages/MessageActio
 import { useHappyChatContext } from '@/components/AssistantChat/context'
 import { NotifySummaryText } from '@/components/AssistantChat/messages/NotifySummaryText'
 import { useSessionSummaryInChat } from '@/hooks/useSessionSummaryInChat'
+import { useMessageRenderRow } from '@/components/AssistantChat/message-render-rows'
 
 const TOOL_COMPONENTS = {
     Fallback: HappyToolMessage
@@ -24,9 +25,11 @@ const MESSAGE_PART_COMPONENTS = {
 
 export function HappyAssistantMessage() {
     const ctx = useHappyChatContext()
+    const row = useMessageRenderRow()
     const showSessionSummaryInChat = useSessionSummaryInChat()
     const messageId = useAuiState((s) => s.message.id)
-    const elementId = getConversationMessageAnchorId(messageId)
+    const elementId = row?.anchorId ?? getConversationMessageAnchorId(messageId)
+    const isReasoningRow = useAuiState(s => row?.partStart != null && s.message.content[row.partStart]?.type === 'reasoning')
     const isCliOutput = useAuiState((s) => {
         const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'cli-output'
@@ -46,6 +49,7 @@ export function HappyAssistantMessage() {
         return parts.length > 0 && parts.every((part) => part.type === 'tool-call')
     })
     const copyText = useAuiState((s) => {
+        if (row && !row.isLast) return ''
         if (s.message.role !== 'assistant') return ''
         return getAssistantCopyText(s.message.content, {
             stripNotifySummary: !showSessionSummaryInChat
@@ -82,8 +86,16 @@ export function HappyAssistantMessage() {
                 ? <CliOutputBlock text={cliText} />
                 : codexReview
                     ? <CodexReviewCard review={codexReview} />
-                    : <MessagePrimitive.Content components={MESSAGE_PART_COMPONENTS} />}
-            <MessageActions
+                    : row?.partStart != null && row.partEnd != null
+                        ? isReasoningRow
+                            ? <ReasoningGroup startIndex={row.partStart} endIndex={row.partEnd} stateKey={row.key}>
+                                {Array.from({ length: row.partEnd - row.partStart + 1 }, (_, index) => (
+                                    <MessagePrimitive.PartByIndex key={row.partStart! + index} index={row.partStart! + index} components={MESSAGE_PART_COMPONENTS} />
+                                ))}
+                            </ReasoningGroup>
+                            : <MessagePrimitive.PartByIndex index={row.partStart} components={MESSAGE_PART_COMPONENTS} />
+                        : <MessagePrimitive.Content components={MESSAGE_PART_COMPONENTS} />}
+            {(!row || row.isLast) ? <MessageActions
                 align="start"
                 copyText={copyText || undefined}
                 metadata={metadata}
@@ -91,7 +103,7 @@ export function HappyAssistantMessage() {
                 showFork={showForkCurrent}
                 historyActionPending={ctx.historyActionPending}
                 onFork={showForkCurrent ? () => ctx.onForkConversation!() : undefined}
-            />
+            /> : null}
         </MessagePrimitive.Root>
     )
 }

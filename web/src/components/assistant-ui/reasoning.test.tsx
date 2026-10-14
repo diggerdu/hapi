@@ -37,7 +37,8 @@ vi.mock('@/components/assistant-ui/markdown-text', () => ({
     UriConfirmProvider: ({ children }: React.PropsWithChildren) => <>{children}</>
 }))
 
-vi.mock('@/components/AssistantChat/context', () => ({
+vi.mock('@/components/AssistantChat/context', async (importOriginal) => ({
+    ...await importOriginal<typeof import('@/components/AssistantChat/context')>(),
     useOptionalHappyChatContext: () => ({ onNestedScrollFollowChange }),
 }))
 

@@ -26,6 +26,7 @@ import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 import { TraceSection } from '@/components/ToolCard/trace'
 import { isSubagentToolName } from '@/chat/subagentTool'
+import { useChatCardState } from '@/components/AssistantChat/context'
 
 const ELAPSED_INTERVAL_MS = 1000
 const TERMINAL_RELATED_TOOL_NAMES = new Set(['Bash', 'CodexBash', 'shell_command', 'run_shell_command'])
@@ -72,12 +73,17 @@ export function getToolTimingDetails(tool: ChatToolCall, now: number): {
     }
 }
 
+let compactToolTimestampFormatter: Intl.DateTimeFormat | undefined
+
 export function formatCompactToolTimestamp(value: number): string {
-    return new Date(value).toLocaleTimeString(undefined, {
+    const date = new Date(value)
+    if (!Number.isFinite(date.getTime())) return 'Invalid Date'
+    compactToolTimestampFormatter ??= new Intl.DateTimeFormat(undefined, {
         hour: 'numeric',
         minute: '2-digit',
         second: '2-digit',
     })
+    return compactToolTimestampFormatter.format(date)
 }
 
 export function ToolTimingSummary(props: {
@@ -407,7 +413,7 @@ export function ToolDetailDialogContent(props: {
 
 function ToolCardInner(props: ToolCardProps) {
     const { t } = useTranslation()
-    const [detailsOpen, setDetailsOpen] = useState(false)
+    const [detailsOpen, setDetailsOpen] = useChatCardState(`tool:${props.block.id}:details`, false)
     const presentation = useMemo(() => getToolPresentation({
         toolName: props.block.tool.name,
         input: props.block.tool.input,
