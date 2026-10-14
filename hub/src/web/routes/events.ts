@@ -85,6 +85,22 @@ export function createEventsRoutes(
         }
 
         const response = streamSSE(c, async (stream) => {
+            let finish!: () => void
+            const finished = new Promise<void>((resolve) => { finish = resolve })
+            const onAbort = () => {
+                manager.unsubscribe(subscriptionId)
+                stream.abort()
+                finish()
+            }
+            // Register before the handshake/replay: either can be backpressured
+            // when a client leaves, and a late listener would miss that abort.
+            c.req.raw.signal.addEventListener('abort', onAbort, { once: true })
+            stream.onAbort(onAbort)
+            if (c.req.raw.signal.aborted || stream.aborted) {
+                onAbort()
+                c.req.raw.signal.removeEventListener('abort', onAbort)
+                return
+            }
             // Reconnects supply the last SSE id they saw; when the manager
             // still has everything after it, the missed events are replayed
             // here and the client skips its REST resync (`resume: 'ok'`).
@@ -97,6 +113,7 @@ export function createEventsRoutes(
                 visibility,
                 resumeFrom,
                 send: (event, eventId) => stream.writeSSE({ data: JSON.stringify(event), id: eventId }),
+                close: () => stream.abort(),
                 sendHeartbeat: async () => {
                     await stream.writeSSE({
                         data: JSON.stringify({
@@ -126,16 +143,16 @@ export function createEventsRoutes(
                 })
 
                 for (const item of replay) {
+                    if (!manager.hasSubscription(subscriptionId)) {
+                        return
+                    }
                     await stream.writeSSE({ data: JSON.stringify(item.event), id: item.eventId })
                 }
                 await manager.drainPending(subscriptionId)
 
-                await new Promise<void>((resolve) => {
-                    const done = () => resolve()
-                    c.req.raw.signal.addEventListener('abort', done, { once: true })
-                    stream.onAbort(done)
-                })
+                await finished
             } finally {
+                c.req.raw.signal.removeEventListener('abort', onAbort)
                 manager.unsubscribe(subscriptionId)
             }
         })

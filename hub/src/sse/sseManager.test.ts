@@ -373,3 +373,224 @@ describe('SSEManager agy catalog announcements', () => {
         expect(globalBeta).toHaveLength(0)
     })
 })
+
+describe('SSEManager slow connection budgets', () => {
+    const event: SyncEvent = { type: 'session-updated', sessionId: 's1', namespace: 'alpha' }
+
+    it('bounds in-flight writes without blocking a healthy connection', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let slowWrites = 0
+        let fastWrites = 0
+        let closed = 0
+        manager.subscribe({
+            id: 'slow', namespace: 'alpha', all: true,
+            send: () => { slowWrites++; return new Promise<void>(() => {}) },
+            sendHeartbeat: () => {}, close: () => { closed++ }
+        })
+        manager.subscribe({
+            id: 'fast', namespace: 'alpha', all: true,
+            send: () => { fastWrites++ }, sendHeartbeat: () => {}
+        })
+        for (let i = 0; i < 4096; i++) manager.broadcast(event)
+
+        expect(slowWrites).toBe(256)
+        expect(fastWrites).toBe(4096)
+        expect(closed).toBe(1)
+        expect(manager.hasSubscription('slow')).toBe(false)
+        expect(manager.hasSubscription('fast')).toBe(true)
+        manager.stop()
+    })
+
+    it('counts UTF-8 bytes rather than string characters', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let writes = 0
+        manager.subscribe({
+            id: 'slow', namespace: 'alpha', all: true,
+            send: () => { writes++; return new Promise<void>(() => {}) }, sendHeartbeat: () => {}
+        })
+        const large: SyncEvent = { ...event, data: { summary: '\u4e2d'.repeat(400_000) } as never }
+        manager.broadcast(large)
+        manager.broadcast(large)
+        expect(writes).toBe(1)
+        expect(manager.hasSubscription('slow')).toBe(false)
+    })
+
+    it('allows a single oversized frame without buffering behind it', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let writes = 0
+        manager.subscribe({
+            id: 'slow', namespace: 'alpha', all: true,
+            send: () => { writes++; return new Promise<void>(() => {}) }, sendHeartbeat: () => {}
+        })
+        manager.broadcast({ ...event, data: { summary: 'x'.repeat(2_100_000) } as never })
+        expect(writes).toBe(1)
+        expect(manager.hasSubscription('slow')).toBe(true)
+        manager.broadcast(event)
+        expect(writes).toBe(1)
+        expect(manager.hasSubscription('slow')).toBe(false)
+    })
+
+    it('releases the write budget after successful delivery', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let resolveWrites: Array<() => void> = []
+        manager.subscribe({
+            id: 'reader', namespace: 'alpha', all: true,
+            send: () => new Promise<void>(resolve => { resolveWrites.push(resolve) }), sendHeartbeat: () => {}
+        })
+        for (let batch = 0; batch < 3; batch++) {
+            for (let i = 0; i < 256; i++) manager.broadcast(event)
+            expect(manager.hasSubscription('reader')).toBe(true)
+            for (const resolve of resolveWrites) resolve()
+            resolveWrites = []
+            await Promise.resolve()
+        }
+        manager.stop()
+    })
+
+    it('bounds live events queued behind a reconnect replay', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let cursor: string | undefined
+        manager.subscribe({
+            id: 'old', namespace: 'alpha', all: true,
+            send: (_, id) => { cursor ??= id }, sendHeartbeat: () => {}
+        })
+        manager.broadcast(event)
+        manager.broadcast(event)
+        manager.unsubscribe('old')
+        let writes = 0
+        let closed = 0
+        const resumed = manager.subscribe({
+            id: 'replay', namespace: 'alpha', all: true, resumeFrom: cursor,
+            send: () => { writes++ }, sendHeartbeat: () => {}, close: () => { closed++ }
+        })
+        expect(resumed.replay).toHaveLength(1)
+        for (let i = 0; i < 257; i++) manager.broadcast(event)
+        await manager.drainPending('replay')
+        expect(writes).toBe(0)
+        expect(closed).toBe(1)
+        expect(manager.hasSubscription('replay')).toBe(false)
+    })
+
+    it('ends an awaiting replay drain when the connection closes', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let cursor: string | undefined
+        manager.subscribe({
+            id: 'old', namespace: 'alpha', all: true,
+            send: (_, id) => { cursor ??= id }, sendHeartbeat: () => {}
+        })
+        manager.broadcast(event)
+        manager.broadcast(event)
+        manager.unsubscribe('old')
+        manager.subscribe({
+            id: 'replay', namespace: 'alpha', all: true, resumeFrom: cursor,
+            send: () => new Promise<void>(() => {}), sendHeartbeat: () => {}
+        })
+        manager.broadcast(event)
+        const draining = manager.drainPending('replay')
+        manager.unsubscribe('replay')
+        const result = await Promise.race([draining.then(() => 'done'), Bun.sleep(100).then(() => 'stuck')])
+        expect(result).toBe('done')
+    })
+
+    it('counts the in-flight drain and newly queued bytes in one budget', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let cursor: string | undefined
+        manager.subscribe({
+            id: 'old', namespace: 'alpha', all: true,
+            send: (_, id) => { cursor ??= id }, sendHeartbeat: () => {}
+        })
+        manager.broadcast(event)
+        manager.broadcast(event)
+        manager.unsubscribe('old')
+        manager.subscribe({
+            id: 'replay', namespace: 'alpha', all: true, resumeFrom: cursor,
+            send: () => new Promise<void>(() => {}), sendHeartbeat: () => {}
+        })
+        const large: SyncEvent = { ...event, data: { summary: 'x'.repeat(1_100_000) } as never }
+        manager.broadcast(large)
+        const draining = manager.drainPending('replay')
+        manager.broadcast(large)
+        await draining
+        expect(manager.hasSubscription('replay')).toBe(false)
+    })
+
+    it('times out stalled writes and settles toast delivery', async () => {
+        const tracker = new VisibilityTracker()
+        const manager = new SSEManager(0, tracker, 20)
+        let closed = 0
+        manager.subscribe({
+            id: 'stalled', namespace: 'alpha', all: true, visibility: 'visible',
+            send: () => new Promise<void>(() => {}), sendHeartbeat: () => {}, close: () => { closed++ }
+        })
+        const delivered = await manager.sendToast('alpha', {
+            type: 'toast', data: { title: 'Test', body: 'Body', sessionId: 's1', url: '/sessions/s1' }
+        })
+        expect(delivered).toBe(0)
+        expect(closed).toBe(1)
+        expect(manager.hasSubscription('stalled')).toBe(false)
+        expect(tracker.isVisibleConnection('stalled')).toBe(false)
+    })
+
+    it('does not time out a connection that continues making progress', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker(), 150)
+        const resolvers: Array<() => void> = []
+        manager.subscribe({
+            id: 'progress', namespace: 'alpha', all: true,
+            send: () => new Promise<void>(resolve => { resolvers.push(resolve) }), sendHeartbeat: () => {}
+        })
+        manager.broadcast(event)
+        manager.broadcast(event)
+        await Bun.sleep(80)
+        resolvers[0]!()
+        await Bun.sleep(100)
+        expect(manager.hasSubscription('progress')).toBe(true)
+        resolvers[1]!()
+        await Bun.sleep(160)
+        expect(manager.hasSubscription('progress')).toBe(true)
+        manager.stop()
+    })
+
+    it('times out a stalled heartbeat', async () => {
+        const manager = new SSEManager(5, new VisibilityTracker(), 20)
+        let closed = 0
+        manager.subscribe({
+            id: 'heartbeat', namespace: 'alpha', all: true,
+            send: () => {}, sendHeartbeat: () => new Promise<void>(() => {}), close: () => { closed++ }
+        })
+        await Bun.sleep(70)
+        expect(closed).toBe(1)
+        expect(manager.hasSubscription('heartbeat')).toBe(false)
+    })
+
+    it('does not remove a replacement subscription when an old write fails', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let reject!: (reason: Error) => void
+        manager.subscribe({
+            id: 'same', namespace: 'alpha', all: true,
+            send: () => new Promise<void>((_, fail) => { reject = fail }), sendHeartbeat: () => {}
+        })
+        manager.broadcast(event)
+        manager.subscribe({ id: 'same', namespace: 'alpha', all: true, send: () => {}, sendHeartbeat: () => {} })
+        reject(new Error('old transport closed'))
+        await Promise.resolve()
+        expect(manager.hasSubscription('same')).toBe(true)
+        manager.stop()
+    })
+
+    it('isolates synchronous send/close failures from other connections', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        manager.subscribe({
+            id: 'broken', namespace: 'alpha', all: true,
+            send: () => { throw new Error('write failed') }, sendHeartbeat: () => {},
+            close: () => { throw new Error('close failed') }
+        })
+        let writes = 0
+        manager.subscribe({
+            id: 'healthy', namespace: 'alpha', all: true, send: () => { writes++ }, sendHeartbeat: () => {}
+        })
+        expect(() => manager.broadcast(event)).not.toThrow()
+        expect(writes).toBe(1)
+        expect(manager.hasSubscription('broken')).toBe(false)
+        manager.stop()
+    })
+})

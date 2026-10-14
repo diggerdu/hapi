@@ -14,12 +14,17 @@ export type SSESubscription = {
 type SSEConnection = SSESubscription & {
     send: (event: SyncEvent, eventId?: string) => void | Promise<void>
     sendHeartbeat: () => void | Promise<void>
+    close?: () => void
+    bufferedEvents: number
+    bufferedBytes: number
+    writeTimer: NodeJS.Timeout | null
+    cancelWrites: Set<() => void>
     /**
      * Non-null while a resumed connection is still writing its replay: live
      * broadcasts land here instead of on the wire so replayed events keep
      * their original order. `drainPending` flushes and clears it.
      */
-    pending: Array<{ event: SyncEvent; eventId: string }> | null
+    pending: Array<{ event: SyncEvent; eventId: string; bytes: number }> | null
 }
 
 export type SSEResumeResult = {
@@ -36,6 +41,8 @@ const EVENT_BUFFER_CAPACITY = 256
  * cursors resync via REST like they always did.
  */
 const EVENT_BUFFER_MAX_BYTES = 2 * 1024 * 1024
+const CONNECTION_MAX_EVENTS = 256
+const CONNECTION_MAX_BYTES = 2 * 1024 * 1024
 
 export class SSEManager {
     private readonly connections: Map<string, SSEConnection> = new Map()
@@ -57,7 +64,11 @@ export class SSEManager {
     private eventBufferBytes = 0
     private readonly namespaceTags = new Map<string, string>()
 
-    constructor(heartbeatMs = 30_000, visibilityTracker: VisibilityTracker) {
+    constructor(
+        heartbeatMs = 30_000,
+        visibilityTracker: VisibilityTracker,
+        private readonly writeTimeoutMs = 30_000
+    ) {
         this.heartbeatMs = heartbeatMs
         this.visibilityTracker = visibilityTracker
     }
@@ -73,7 +84,10 @@ export class SSEManager {
         resumeFrom?: string | null
         send: (event: SyncEvent, eventId?: string) => void | Promise<void>
         sendHeartbeat: () => void | Promise<void>
+        /** Abort the transport when a connection fails or exceeds its budget. */
+        close?: () => void
     }): SSESubscription & SSEResumeResult {
+        this.unsubscribe(options.id)
         const subscription: SSEConnection = {
             id: options.id,
             namespace: options.namespace,
@@ -82,6 +96,11 @@ export class SSEManager {
             machineId: options.machineId ?? null,
             send: options.send,
             sendHeartbeat: options.sendHeartbeat,
+            close: options.close,
+            bufferedEvents: 0,
+            bufferedBytes: 0,
+            writeTimer: null,
+            cancelWrites: new Set(),
             pending: null
         }
 
@@ -120,22 +139,102 @@ export class SSEManager {
         if (!connection) {
             return
         }
-        while (connection.pending) {
-            const batch = connection.pending.splice(0)
-            if (batch.length === 0) {
+        while (this.connections.get(id) === connection && connection.pending) {
+            const item = connection.pending.shift()
+            if (!item) {
                 // No await between this check and the assignment, so no
                 // broadcast can slip into the queue and be dropped.
                 connection.pending = null
                 break
             }
-            for (const item of batch) {
-                try {
-                    await connection.send(item.event, item.eventId)
-                } catch {
-                    this.unsubscribe(connection.id)
-                    return
-                }
+            const sent = await this.deliver(
+                connection, () => connection.send(item.event, item.eventId), item.bytes, true
+            )
+            if (!sent) {
+                return
             }
+        }
+    }
+
+    private reserve(connection: SSEConnection, bytes: number): boolean {
+        if (this.connections.get(connection.id) !== connection) {
+            return false
+        }
+        // Permit one oversized frame, as the replay ring does, but never let
+        // more work accumulate behind it. The client can resume or REST-resync.
+        if (connection.bufferedEvents >= CONNECTION_MAX_EVENTS
+            || (connection.bufferedEvents > 0 && connection.bufferedBytes + bytes > CONNECTION_MAX_BYTES)) {
+            this.unsubscribe(connection.id)
+            return false
+        }
+        connection.bufferedEvents += 1
+        connection.bufferedBytes += bytes
+        return true
+    }
+
+    private ensureWriteTimeout(connection: SSEConnection): void {
+        if (connection.writeTimer || connection.bufferedEvents === 0) {
+            return
+        }
+        connection.writeTimer = setTimeout(() => {
+            if (this.connections.get(connection.id) === connection) {
+                this.unsubscribe(connection.id)
+            }
+        }, this.writeTimeoutMs)
+        connection.writeTimer.unref()
+    }
+
+    private release(connection: SSEConnection, bytes: number): void {
+        connection.bufferedEvents -= 1
+        connection.bufferedBytes -= bytes
+        if (connection.writeTimer) {
+            clearTimeout(connection.writeTimer)
+            connection.writeTimer = null
+        }
+        this.ensureWriteTimeout(connection)
+    }
+
+    private deliver(
+        connection: SSEConnection,
+        send: () => void | Promise<void>,
+        bytes: number,
+        reserved = false
+    ): Promise<boolean> {
+        if (this.connections.get(connection.id) !== connection || (!reserved && !this.reserve(connection, bytes))) {
+            return Promise.resolve(false)
+        }
+        try {
+            const result = send()
+            if (this.connections.get(connection.id) !== connection) {
+                return Promise.resolve(result).then(() => false, () => false)
+            }
+            if (!result) {
+                this.release(connection, bytes)
+                return Promise.resolve(true)
+            }
+            this.ensureWriteTimeout(connection)
+            return new Promise<boolean>((resolve) => {
+                const cancel = () => resolve(false)
+                connection.cancelWrites.add(cancel)
+                void result.then(() => {
+                    connection.cancelWrites.delete(cancel)
+                    const current = this.connections.get(connection.id) === connection
+                    if (current) {
+                        this.release(connection, bytes)
+                    }
+                    resolve(current)
+                }, () => {
+                    if (this.connections.get(connection.id) === connection) {
+                        this.unsubscribe(connection.id)
+                    }
+                    resolve(false)
+                })
+            })
+        } catch {
+            if (this.connections.get(connection.id) === connection) {
+                this.unsubscribe(connection.id)
+            }
+            return Promise.resolve(false)
         }
     }
 
@@ -185,9 +284,9 @@ export class SSEManager {
         return { resume: 'ok', replay }
     }
 
-    private recordEvent(event: SyncEvent): number {
+    private recordEvent(event: SyncEvent): { seq: number; bytes: number } {
         const seq = this.nextSeq++
-        const bytes = JSON.stringify(event).length
+        const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8')
         this.eventBuffer.push({ seq, event, bytes })
         this.eventBufferBytes += bytes
         while (
@@ -199,14 +298,33 @@ export class SSEManager {
                 this.eventBufferBytes -= evicted.bytes
             }
         }
-        return seq
+        return { seq, bytes }
     }
 
     unsubscribe(id: string): void {
+        const connection = this.connections.get(id)
+        if (!connection) {
+            return
+        }
         this.connections.delete(id)
+        if (connection.writeTimer) {
+            clearTimeout(connection.writeTimer)
+        }
+        connection.pending = null
+        connection.bufferedEvents = 0
+        connection.bufferedBytes = 0
+        for (const cancel of connection.cancelWrites) {
+            cancel()
+        }
+        connection.cancelWrites.clear()
         this.visibilityTracker.removeConnection(id)
         if (this.connections.size === 0) {
             this.stopHeartbeat()
+        }
+        try {
+            connection.close?.()
+        } catch {
+            // A broken transport must not prevent other clients from receiving.
         }
     }
 
@@ -215,7 +333,8 @@ export class SSEManager {
     }
 
     async sendToast(namespace: string, event: Extract<SyncEvent, { type: 'toast' }>): Promise<number> {
-        const deliveries: Array<Promise<{ id: string; ok: boolean }>> = []
+        const deliveries: Array<Promise<boolean>> = []
+        const bytes = Buffer.byteLength(JSON.stringify(event), 'utf8')
         for (const connection of this.connections.values()) {
             if (connection.namespace !== namespace) {
                 continue
@@ -224,11 +343,7 @@ export class SSEManager {
                 continue
             }
 
-            deliveries.push(
-                Promise.resolve(connection.send(event))
-                    .then(() => ({ id: connection.id, ok: true }))
-                    .catch(() => ({ id: connection.id, ok: false }))
-            )
+            deliveries.push(this.deliver(connection, () => connection.send(event), bytes))
         }
 
         if (deliveries.length === 0) {
@@ -236,20 +351,11 @@ export class SSEManager {
         }
 
         const results = await Promise.all(deliveries)
-        let successCount = 0
-        for (const result of results) {
-            if (result.ok) {
-                successCount += 1
-                continue
-            }
-            this.unsubscribe(result.id)
-        }
-
-        return successCount
+        return results.filter(Boolean).length
     }
 
     broadcast(event: SyncEvent): void {
-        const seq = this.recordEvent(event)
+        const { seq, bytes } = this.recordEvent(event)
         for (const connection of this.connections.values()) {
             if (!this.shouldSend(connection, event)) {
                 continue
@@ -259,22 +365,22 @@ export class SSEManager {
             // the receiving namespace so the cursor stays bound to it.
             const eventId = this.eventIdFor(seq, connection.namespace)
             if (connection.pending) {
-                connection.pending.push({ event, eventId })
+                if (this.reserve(connection, bytes)) {
+                    connection.pending.push({ event, eventId, bytes })
+                    this.ensureWriteTimeout(connection)
+                }
                 continue
             }
 
-            void Promise.resolve(connection.send(event, eventId)).catch(() => {
-                this.unsubscribe(connection.id)
-            })
+            void this.deliver(connection, () => connection.send(event, eventId), bytes)
         }
     }
 
     stop(): void {
         this.stopHeartbeat()
         for (const id of this.connections.keys()) {
-            this.visibilityTracker.removeConnection(id)
+            this.unsubscribe(id)
         }
-        this.connections.clear()
     }
 
     private ensureHeartbeat(): void {
@@ -284,9 +390,7 @@ export class SSEManager {
 
         this.heartbeatTimer = setInterval(() => {
             for (const connection of this.connections.values()) {
-                void Promise.resolve(connection.sendHeartbeat()).catch(() => {
-                    this.unsubscribe(connection.id)
-                })
+                void this.deliver(connection, () => connection.sendHeartbeat(), 0)
             }
         }, this.heartbeatMs)
     }
